@@ -108,9 +108,9 @@ def get_cfg(cfg: Union[str, Path, Dict, SimpleNamespace] = DEFAULT_CFG_DICT, ove
     # Merge overrides
     if overrides:
         overrides = cfg2dict(overrides)
-        if 'save_dir' not in cfg:
-            overrides.pop('save_dir', None)  # special override keys to ignore
-        check_dict_alignment(cfg, overrides)
+        # if 'save_dir' not in cfg:
+        #     overrides.pop('save_dir', None)  # special override keys to ignore
+        # check_dict_alignment(cfg, overrides)
         cfg = {**cfg, **overrides}  # merge cfg and overrides dicts (prefer overrides)
 
     # Special handling for numeric project/name
@@ -156,7 +156,7 @@ def get_save_dir(args, name=None):
         project = args.project or (ROOT.parent / 'tests/tmp/runs' if TESTS_RUNNING else RUNS_DIR) / args.task
         name = name or args.name or f'{args.mode}'
         save_dir = increment_path(Path(project) / name, exist_ok=args.exist_ok if RANK in (-1, 0) else True)
-
+        # save_dir = r'/mnt/pai-storage-ceph-hdd/Dataset/Vehicle/QIDIAN/color_class/pos_cls'
     return Path(save_dir)
 
 

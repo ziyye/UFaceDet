@@ -6,7 +6,7 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
-
+from ultralytics.nn.ShuffleNet import Conv_maxpool,ShuffleNetV2
 from ultralytics.nn.modules import (AIFI, C1, C2, C3, C3TR, SPP, SPPF, Bottleneck, BottleneckCSP, C2f, C3Ghost, C3x,
                                     Classify, Concat, Conv, Conv2, ConvTranspose, Detect, DWConv, DWConvTranspose2d,
                                     Focus, GhostBottleneck, GhostConv, HGBlock, HGStem, Pose, RepC3, RepConv,
@@ -564,7 +564,7 @@ def torch_safe_load(weight):
                 'ultralytics.yolo.utils': 'ultralytics.utils',
                 'ultralytics.yolo.v8': 'ultralytics.models.yolo',
                 'ultralytics.yolo.data': 'ultralytics.data'}):  # for legacy 8.0 Classify and Pose models
-            return torch.load(file, map_location='cpu'), file  # load
+            return torch.load(file, map_location='cpu',weights_only=False), file  # load
 
     except ModuleNotFoundError as e:  # e.name is missing module name
         if e.name == 'models':
@@ -694,6 +694,13 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 n = 1
         elif m is AIFI:
             args = [ch[f], *args]
+
+        elif m in [ShuffleNetV2, Conv_maxpool]:
+            c1, c2 = ch[f], args[0]
+            if c2 != nc:  # if c2 not equal to number of classes (i.e. for Classify() output)
+                c2 = make_divisible(c2 * width, 8)
+            args = [c1, c2, *args[1:]]    
+            
         elif m in (HGStem, HGBlock):
             c1, cm, c2 = ch[f], args[0], args[1]
             args = [c1, cm, c2, *args[2:]]

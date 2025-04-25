@@ -121,7 +121,7 @@ class BaseTrainer:
 
         self.trainset, self.testset = self.get_dataset(self.data)
         self.ema = None
-        self.resume = False
+        # self.resume = False
 
         # Optimization utils init
         self.lf = None
@@ -134,7 +134,8 @@ class BaseTrainer:
         self.tloss = None
         self.loss_names = ['Loss']
         self.csv = self.save_dir / 'results.csv'
-        self.plot_idx = [0, 1, 2]
+        # self.plot_idx = [0, 1, 2]
+        self.plot_idx = [x for x in range(20)]
 
         # Callbacks
         self.callbacks = _callbacks or callbacks.get_default_callbacks()
@@ -343,6 +344,16 @@ class BaseTrainer:
                 # Backward
                 self.scaler.scale(self.loss).backward()
 
+                # ========== added（新增） ==========
+                # 1 constrained training
+                l1_lambda = 1e-2 * (1 - 0.9 * epoch / self.epochs)
+                for k, m in self.model.named_modules():
+                    if isinstance(m, nn.BatchNorm2d):
+                        if m.weight.requires_grad:
+                            m.weight.grad.data.add_(l1_lambda * torch.sign(m.weight.data))
+                        if m.bias.requires_grad:
+                            m.bias.grad.data.add_(1e-2 * torch.sign(m.bias.data))
+                # ========== added（新增） ==========
                 # Optimize - https://pytorch.org/docs/master/notes/amp_examples.html
                 if ni - last_opt_step >= self.accumulate:
                     self.optimizer_step()
@@ -458,6 +469,10 @@ class BaseTrainer:
         else:
             cfg = model
         self.model = self.get_model(cfg=cfg, weights=weights, verbose=RANK == -1)  # calls Model(cfg, weights)
+        # ========== added（新增） ==========
+        # 2 finetune 回调训练
+        # self.model = weights
+        # ========== added（新增） ==========
         return ckpt
 
     def optimizer_step(self):

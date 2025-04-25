@@ -3,17 +3,22 @@ import contextlib
 from itertools import repeat
 from multiprocessing.pool import ThreadPool
 from pathlib import Path
+import hashlib
 
 import cv2
 import numpy as np
 import torch
 import torchvision
+from torch.utils.data import Sampler
 
 from ultralytics.utils import LOCAL_RANK, NUM_THREADS, TQDM, colorstr, is_dir_writeable
 
 from .augment import Compose, Format, Instances, LetterBox, classify_albumentations, classify_transforms, v8_transforms
 from .base import BaseDataset
 from .utils import HELP_URL, LOGGER, get_hash, img2label_paths, verify_image, verify_image_label
+# from ultralytics.data.augment import Compose, Format, Instances, LetterBox, classify_albumentations, classify_transforms, v8_transforms
+# from ultralytics.data.base import BaseDataset
+# from ultralytics.data.utils import HELP_URL, LOGGER, get_hash, img2label_paths, verify_image, verify_image_label
 
 # Ultralytics dataset *.cache version, >= 1.0.0 for YOLOv8
 DATASET_CACHE_VERSION = '1.0.3'
@@ -22,9 +27,16 @@ DATASET_CACHE_VERSION = '1.0.3'
 class YOLODataset(BaseDataset):
     """
     Dataset class for loading object detection and/or segmentation labels in YOLO format.
+    Can handle multiple dataset sources specified in the data configuration.
 
     Args:
         data (dict, optional): A dataset YAML dictionary. Defaults to None.
+             Expected format for multi-dataset:
+             train:
+               - /path/to/dataset1
+               - /path/to/dataset2
+             val: /path/to/val_dataset
+             weights: [0.7, 0.3] # Optional weights for train datasets
         use_segments (bool, optional): If True, segmentation masks are used as labels. Defaults to False.
         use_keypoints (bool, optional): If True, keypoints are used as labels. Defaults to False.
 
@@ -37,29 +49,46 @@ class YOLODataset(BaseDataset):
         self.use_segments = use_segments
         self.use_keypoints = use_keypoints
         self.data = data
+        self.is_multidataset = isinstance(kwargs.get('img_path', ''), list)
+        self.dataset_paths = kwargs.get('img_path', []) if self.is_multidataset else [kwargs.get('img_path', '')]
+        self.dataset_indices = []
+        self.dataset_lens = []
         assert not (self.use_segments and self.use_keypoints), 'Can not use both segments and keypoints.'
         super().__init__(*args, **kwargs)
 
-    def cache_labels(self, path=Path('./labels.cache')):
+    def cache_labels(self, path=Path('./labels.cache'), im_files_to_cache=None, label_files_to_cache=None):
         """
-        Cache dataset labels, check images and read shapes.
+        Cache dataset labels, check images and read shapes for a specific subset of files.
 
         Args:
-            path (Path): path where to save the cache file (default: Path('./labels.cache')).
+            path (Path): path where to save the cache file.
+            im_files_to_cache (list): List of image files for this specific cache.
+            label_files_to_cache (list): List of label files for this specific cache.
         Returns:
-            (dict): labels.
+            (dict): labels cache dictionary.
         """
         x = {'labels': []}
         nm, nf, ne, nc, msgs = 0, 0, 0, 0, []  # number missing, found, empty, corrupt, messages
         desc = f'{self.prefix}Scanning {path.parent / path.stem}...'
-        total = len(self.im_files)
+
+        im_files = im_files_to_cache if im_files_to_cache is not None else self.im_files
+        label_files = label_files_to_cache if label_files_to_cache is not None else self.label_files
+        total = len(im_files)
+
+        if total == 0:
+            x['hash'] = ''
+            x['results'] = 0, 0, 0, 0, 0
+            x['msgs'] = []
+            return x
+
         nkpt, ndim = self.data.get('kpt_shape', (0, 0))
         if self.use_keypoints and (nkpt <= 0 or ndim not in (2, 3)):
             raise ValueError("'kpt_shape' in data.yaml missing or incorrect. Should be a list with [number of "
                              "keypoints, number of dims (2 for x,y or 3 for x,y,visible)], i.e. 'kpt_shape: [17, 3]'")
+
         with ThreadPool(NUM_THREADS) as pool:
             results = pool.imap(func=verify_image_label,
-                                iterable=zip(self.im_files, self.label_files, repeat(self.prefix),
+                                iterable=zip(im_files, label_files, repeat(self.prefix),
                                              repeat(self.use_keypoints), repeat(len(self.data['names'])), repeat(nkpt),
                                              repeat(ndim)))
             pbar = TQDM(results, desc=desc, total=total)
@@ -88,51 +117,119 @@ class YOLODataset(BaseDataset):
             LOGGER.info('\n'.join(msgs))
         if nf == 0:
             LOGGER.warning(f'{self.prefix}WARNING ⚠️ No labels found in {path}. {HELP_URL}')
-        x['hash'] = get_hash(self.label_files + self.im_files)
-        x['results'] = nf, nm, ne, nc, len(self.im_files)
+        x['hash'] = get_hash(label_files + im_files)
+        x['results'] = nf, nm, ne, nc, total
         x['msgs'] = msgs  # warnings
         save_dataset_cache_file(self.prefix, path, x)
         return x
 
     def get_labels(self):
-        """Returns dictionary of labels for YOLO training."""
-        self.label_files = img2label_paths(self.im_files)
-        cache_path = Path(self.label_files[0]).parent.with_suffix('.cache')
-        try:
-            cache, exists = load_dataset_cache_file(cache_path), True  # attempt to load a *.cache file
-            assert cache['version'] == DATASET_CACHE_VERSION  # matches current version
-            assert cache['hash'] == get_hash(self.label_files + self.im_files)  # identical hash
-        except (FileNotFoundError, AssertionError, AttributeError):
-            cache, exists = self.cache_labels(cache_path), False  # run cache ops
+        """Returns dictionary of labels for YOLO training, handling multiple datasets and caching."""
+        all_labels = []
+        combined_im_files = []
+        combined_label_files = []
+        self.dataset_indices = [0]
+        self.dataset_lens = []
 
-        # Display cache
-        nf, nm, ne, nc, n = cache.pop('results')  # found, missing, empty, corrupt, total
-        if exists and LOCAL_RANK in (-1, 0):
-            d = f'Scanning {cache_path}... {nf} images, {nm + ne} backgrounds, {nc} corrupt'
-            TQDM(None, desc=self.prefix + d, total=n, initial=n)  # display results
-            if cache['msgs']:
-                LOGGER.info('\n'.join(cache['msgs']))  # display warnings
+        dataset_paths_to_process = self.dataset_paths
 
-        # Read cache
-        [cache.pop(k) for k in ('hash', 'version', 'msgs')]  # remove items
-        labels = cache['labels']
-        if not labels:
-            LOGGER.warning(f'WARNING ⚠️ No images found in {cache_path}, training may not work correctly. {HELP_URL}')
-        self.im_files = [lb['im_file'] for lb in labels]  # update im_files
+        total_nf, total_nm, total_ne, total_nc, total_n = 0, 0, 0, 0, 0
+        all_msgs = []
 
-        # Check if the dataset is all boxes or all segments
-        lengths = ((len(lb['cls']), len(lb['bboxes']), len(lb['segments'])) for lb in labels)
+        im_files_per_dataset = self._group_files_by_source_path(self.im_files, dataset_paths_to_process)
+
+        for i, dataset_path in enumerate(dataset_paths_to_process):
+            current_im_files = im_files_per_dataset[i]
+            if not current_im_files:
+                LOGGER.warning(f"{self.prefix}WARNING ⚠️ No images found for dataset path: {dataset_path}")
+                self.dataset_lens.append(0)
+                self.dataset_indices.append(self.dataset_indices[-1])
+                continue
+
+            current_label_files = img2label_paths(current_im_files)
+            path_hash = hashlib.sha256(str(dataset_path).encode()).hexdigest()[:8]
+            cache_path = Path(self.data.get('path', '.')) / f'{Path(dataset_path).stem}_{path_hash}.cache'
+
+            try:
+                cache, exists = load_dataset_cache_file(cache_path), True
+                assert cache['version'] == DATASET_CACHE_VERSION
+                assert cache['hash'] == get_hash(current_label_files + current_im_files)
+            except (FileNotFoundError, AssertionError, AttributeError, TypeError):
+                cache, exists = self.cache_labels(cache_path, current_im_files, current_label_files), False
+
+            nf, nm, ne, nc, n = cache.pop('results')
+            if exists and LOCAL_RANK in (-1, 0):
+                d = f'Scanning {cache_path}... {nf} images, {nm + ne} backgrounds, {nc} corrupt'
+                TQDM(None, desc=self.prefix + d, total=n, initial=n)
+                if cache['msgs']:
+                    LOGGER.info('\n'.join(cache['msgs']))
+
+            [cache.pop(k) for k in ('hash', 'version', 'msgs')]
+            labels = cache['labels']
+            if not labels:
+                LOGGER.warning(f'WARNING ⚠️ No labels found in {cache_path} for dataset {dataset_path}.')
+
+            all_labels.extend(labels)
+            num_labels_added = len(labels)
+            self.dataset_lens.append(num_labels_added)
+            self.dataset_indices.append(self.dataset_indices[-1] + num_labels_added)
+
+            total_nf += nf
+            total_nm += nm
+            total_ne += ne
+            total_nc += nc
+            total_n += n
+            all_msgs.extend(cache.get('msgs', []))
+
+        if not all_labels:
+            LOGGER.error(f'ERROR ❌ No labels found across all datasets {dataset_paths_to_process}. {HELP_URL}')
+            raise ValueError(f"No labels found in any specified dataset paths: {dataset_paths_to_process}")
+
+        self.im_files = [lb['im_file'] for lb in all_labels]
+        self.labels = all_labels
+        self.ni = len(self.labels)
+
+        if LOCAL_RANK in (-1, 0):
+            LOGGER.info(f"{self.prefix}Combined results: {total_nf} images ({total_nm} missing, {total_ne} empty labels, {total_nc} corrupt)")
+
+        lengths = ((len(lb['cls']), len(lb['bboxes']), len(lb['segments'])) for lb in self.labels)
         len_cls, len_boxes, len_segments = (sum(x) for x in zip(*lengths))
         if len_segments and len_boxes != len_segments:
             LOGGER.warning(
-                f'WARNING ⚠️ Box and segment counts should be equal, but got len(segments) = {len_segments}, '
+                f'WARNING ⚠️ Combined dataset: Box and segment counts should be equal, but got len(segments) = {len_segments}, '
                 f'len(boxes) = {len_boxes}. To resolve this only boxes will be used and all segments will be removed. '
-                'To avoid this please supply either a detect or segment dataset, not a detect-segment mixed dataset.')
-            for lb in labels:
+                'To avoid this please supply either detect or segment datasets, not mixed ones.')
+            for lb in self.labels:
                 lb['segments'] = []
         if len_cls == 0:
-            LOGGER.warning(f'WARNING ⚠️ No labels found in {cache_path}, training may not work correctly. {HELP_URL}')
-        return labels
+            LOGGER.warning(f'WARNING ⚠️ Combined dataset: No labels found after processing all sources. Training may not work correctly. {HELP_URL}')
+
+        self.dataset_indices.pop()
+
+        assert len(self.im_files) == self.ni, "Mismatch between image file count and label count after processing."
+        assert len(self.dataset_indices) == len(self.dataset_lens) == len(dataset_paths_to_process), "Dataset index/length tracking mismatch."
+        assert sum(self.dataset_lens) == self.ni, "Sum of dataset lengths does not match total labels."
+
+        return self.labels
+
+    def _group_files_by_source_path(self, all_files, source_paths):
+        """Groups a list of file paths based on which source directory they originated from."""
+        grouped_files = [[] for _ in source_paths]
+        norm_source_paths = [str(Path(p).resolve()) for p in source_paths]
+
+        for file_path in all_files:
+            resolved_file_path = str(Path(file_path).resolve())
+            found = False
+            sorted_indices = sorted(range(len(norm_source_paths)), key=lambda k: len(norm_source_paths[k]), reverse=True)
+            for i in sorted_indices:
+                if resolved_file_path.startswith(norm_source_paths[i]):
+                    grouped_files[i].append(file_path)
+                    found = True
+                    break
+            if not found:
+                LOGGER.warning(f"Could not assign file {file_path} to any source path: {source_paths}")
+
+        return grouped_files
 
     def build_transforms(self, hyp=None):
         """Builds and appends transforms to the list."""
@@ -154,15 +251,13 @@ class YOLODataset(BaseDataset):
 
     def close_mosaic(self, hyp):
         """Sets mosaic, copy_paste and mixup options to 0.0 and builds transformations."""
-        hyp.mosaic = 0.0  # set mosaic ratio=0.0
-        hyp.copy_paste = 0.0  # keep the same behavior as previous v8 close-mosaic
-        hyp.mixup = 0.0  # keep the same behavior as previous v8 close-mosaic
+        hyp.mosaic = 0.0
+        hyp.copy_paste = 0.0
+        hyp.mixup = 0.0
         self.transforms = self.build_transforms(hyp)
 
     def update_labels_info(self, label):
         """Custom your label format here."""
-        # NOTE: cls is not with bboxes now, classification and semantic segmentation need an independent cls label
-        # We can make it also support classification and semantic segmentation by add or remove some dict keys there.
         bboxes = label.pop('bboxes')
         segments = label.pop('segments')
         keypoints = label.pop('keypoints', None)
@@ -186,7 +281,7 @@ class YOLODataset(BaseDataset):
             new_batch[k] = value
         new_batch['batch_idx'] = list(new_batch['batch_idx'])
         for i in range(len(new_batch['batch_idx'])):
-            new_batch['batch_idx'][i] += i  # add target image index for build_targets()
+            new_batch['batch_idx'][i] += i
         new_batch['batch_idx'] = torch.cat(new_batch['batch_idx'], 0)
         return new_batch
 
@@ -218,38 +313,38 @@ class ClassificationDataset(torchvision.datasets.ImageFolder):
             cache (bool | str | optional): Cache setting, can be True, False, 'ram' or 'disk'. Defaults to False.
         """
         super().__init__(root=root)
-        if augment and args.fraction < 1.0:  # reduce training fraction
+        if augment and args.fraction < 1.0:
             self.samples = self.samples[:round(len(self.samples) * args.fraction)]
         self.prefix = colorstr(f'{prefix}: ') if prefix else ''
         self.cache_ram = cache is True or cache == 'ram'
         self.cache_disk = cache == 'disk'
-        self.samples = self.verify_images()  # filter out bad images
-        self.samples = [list(x) + [Path(x[0]).with_suffix('.npy'), None] for x in self.samples]  # file, index, npy, im
+        self.samples = self.verify_images()
+        self.samples = [list(x) + [Path(x[0]).with_suffix('.npy'), None] for x in self.samples]
         self.torch_transforms = classify_transforms(args.imgsz, rect=args.rect)
         self.album_transforms = classify_albumentations(
             augment=augment,
             size=args.imgsz,
-            scale=(1.0 - args.scale, 1.0),  # (0.08, 1.0)
+            scale=(1.0 - args.scale, 1.0),
             hflip=args.fliplr,
             vflip=args.flipud,
-            hsv_h=args.hsv_h,  # HSV-Hue augmentation (fraction)
-            hsv_s=args.hsv_s,  # HSV-Saturation augmentation (fraction)
-            hsv_v=args.hsv_v,  # HSV-Value augmentation (fraction)
-            mean=(0.0, 0.0, 0.0),  # IMAGENET_MEAN
-            std=(1.0, 1.0, 1.0),  # IMAGENET_STD
+            hsv_h=args.hsv_h,
+            hsv_s=args.hsv_s,
+            hsv_v=args.hsv_v,
+            mean=(0.0, 0.0, 0.0),
+            std=(1.0, 1.0, 1.0),
             auto_aug=False) if augment else None
 
     def __getitem__(self, i):
         """Returns subset of data and targets corresponding to given indices."""
-        f, j, fn, im = self.samples[i]  # filename, index, filename.with_suffix('.npy'), image
+        f, j, fn, im = self.samples[i]
         if self.cache_ram and im is None:
             im = self.samples[i][3] = cv2.imread(f)
         elif self.cache_disk:
-            if not fn.exists():  # load npy
+            if not fn.exists():
                 np.save(fn.as_posix(), cv2.imread(f), allow_pickle=False)
             im = np.load(fn)
-        else:  # read image
-            im = cv2.imread(f)  # BGR
+        else:
+            im = cv2.imread(f)
         if self.album_transforms:
             sample = self.album_transforms(image=cv2.cvtColor(im, cv2.COLOR_BGR2RGB))['image']
         else:
@@ -263,21 +358,20 @@ class ClassificationDataset(torchvision.datasets.ImageFolder):
     def verify_images(self):
         """Verify all images in dataset."""
         desc = f'{self.prefix}Scanning {self.root}...'
-        path = Path(self.root).with_suffix('.cache')  # *.cache file path
+        path = Path(self.root).with_suffix('.cache')
 
         with contextlib.suppress(FileNotFoundError, AssertionError, AttributeError):
-            cache = load_dataset_cache_file(path)  # attempt to load a *.cache file
-            assert cache['version'] == DATASET_CACHE_VERSION  # matches current version
-            assert cache['hash'] == get_hash([x[0] for x in self.samples])  # identical hash
-            nf, nc, n, samples = cache.pop('results')  # found, missing, empty, corrupt, total
+            cache = load_dataset_cache_file(path)
+            assert cache['version'] == DATASET_CACHE_VERSION
+            assert cache['hash'] == get_hash([x[0] for x in self.samples])
+            nf, nc, n, samples = cache.pop('results')
             if LOCAL_RANK in (-1, 0):
                 d = f'{desc} {nf} images, {nc} corrupt'
                 TQDM(None, desc=d, total=n, initial=n)
                 if cache['msgs']:
-                    LOGGER.info('\n'.join(cache['msgs']))  # display warnings
+                    LOGGER.info('\n'.join(cache['msgs']))
             return samples
 
-        # Run scan if *.cache retrieval failed
         nf, nc, msgs, samples, x = 0, 0, [], [], {}
         with ThreadPool(NUM_THREADS) as pool:
             results = pool.imap(func=verify_image, iterable=zip(self.samples, repeat(self.prefix)))
@@ -295,7 +389,7 @@ class ClassificationDataset(torchvision.datasets.ImageFolder):
             LOGGER.info('\n'.join(msgs))
         x['hash'] = get_hash([x[0] for x in self.samples])
         x['results'] = nf, nc, len(samples), samples
-        x['msgs'] = msgs  # warnings
+        x['msgs'] = msgs
         save_dataset_cache_file(self.prefix, path, x)
         return samples
 
@@ -303,21 +397,18 @@ class ClassificationDataset(torchvision.datasets.ImageFolder):
 def load_dataset_cache_file(path):
     """Load an Ultralytics *.cache dictionary from path."""
     import gc
-    gc.disable()  # reduce pickle load time https://github.com/ultralytics/ultralytics/pull/1585
-    cache = np.load(str(path), allow_pickle=True).item()  # load dict
+    gc.disable()
+    cache = np.load(str(path), allow_pickle=True).item()
     gc.enable()
     return cache
 
 
 def save_dataset_cache_file(prefix, path, x):
     """Save an Ultralytics dataset *.cache dictionary x to path."""
-    x['version'] = DATASET_CACHE_VERSION  # add cache version
+    x['version'] = DATASET_CACHE_VERSION
     if is_dir_writeable(path.parent):
         if path.exists():
-            path.unlink()  # remove *.cache file if exists
-        np.save(str(path), x)  # save cache for next time
-        path.with_suffix('.cache.npy').rename(path)  # remove .npy suffix
-        LOGGER.info(f'{prefix}New cache created: {path}')
+            path.unlink()
     else:
         LOGGER.warning(f'{prefix}WARNING ⚠️ Cache directory {path.parent} is not writeable, cache not saved.')
 
@@ -338,3 +429,196 @@ class SemanticDataset(BaseDataset):
     def __init__(self):
         """Initialize a SemanticDataset object."""
         super().__init__()
+
+
+class WeightedMultiDatasetSampler(Sampler):
+    """
+    Sampler for handling multiple datasets with weighted sampling.
+
+    Picks a dataset based on weights, then samples uniformly from that dataset.
+    """
+    def __init__(self, dataset_indices, dataset_lens, dataset_weights, num_samples=None, replacement=True):
+        """
+        Args:
+            dataset_indices (list): List of start indices for each dataset in the combined dataset.
+            dataset_lens (list): List of lengths (number of samples) for each dataset.
+            dataset_weights (list): List of weights corresponding to each dataset.
+            num_samples (int, optional): Total number of samples to draw. If None, defaults to sum of all dataset lengths.
+            replacement (bool): If True, samples are drawn with replacement. Default is True.
+                                (Required for weighted sampling across datasets unless num_samples is carefully chosen)
+        """
+        if not isinstance(dataset_indices, (list, tuple)) or not isinstance(dataset_lens, (list, tuple)) or not isinstance(dataset_weights, (list, tuple)):
+            raise ValueError("dataset_indices, dataset_lens, and dataset_weights must be lists or tuples.")
+        if len(dataset_indices) != len(dataset_lens) or len(dataset_lens) != len(dataset_weights):
+            raise ValueError("Lengths of dataset_indices, dataset_lens, and dataset_weights must match.")
+        if not all(w >= 0 for w in dataset_weights):
+            raise ValueError("Dataset weights must be non-negative.")
+
+        self.dataset_indices = dataset_indices
+        self.dataset_lens = dataset_lens
+        self.dataset_weights = np.array(dataset_weights, dtype=np.float32)
+        self.num_datasets = len(dataset_lens)
+        self.total_len = sum(dataset_lens)
+
+        if num_samples is None:
+            self.num_samples = self.total_len
+        else:
+            if not isinstance(num_samples, int) or num_samples <= 0:
+                raise ValueError("num_samples should be a positive integer.")
+            self.num_samples = num_samples
+
+        self.replacement = replacement
+
+        total_weight = self.dataset_weights.sum()
+        if total_weight <= 0:
+            LOGGER.warning("Total dataset weight is zero or negative. Using uniform weighting.")
+            self.dataset_probs = np.ones(self.num_datasets) / self.num_datasets
+        else:
+            self.dataset_probs = self.dataset_weights / total_weight
+
+    def __iter__(self):
+        """Yields indices for one epoch based on weighted sampling."""
+        dataset_choices = np.random.choice(self.num_datasets, size=self.num_samples, p=self.dataset_probs)
+
+        indices = []
+        for dataset_idx in dataset_choices:
+            start_index = self.dataset_indices[dataset_idx]
+            length = self.dataset_lens[dataset_idx]
+            if length == 0:
+                LOGGER.debug(f"Skipping empty dataset index {dataset_idx}")
+                continue
+
+            offset = np.random.randint(0, length)
+            global_index = start_index + offset
+            indices.append(global_index)
+
+        return iter(indices)
+
+    def __len__(self):
+        """Returns the number of samples drawn in one epoch."""
+        return self.num_samples
+
+
+if __name__ == '__main__':
+    import os
+    os.environ['CUDA_VISIBLE_DEVICES'] = '3'
+    # Example Usage (modify paths and YAML structure accordingly)
+    import yaml
+    import re
+    from torch.utils.data import DataLoader
+
+    test_yaml_path = '/mnt/pai-storage-8/tianyuan/face_qrcode_det/yolov8/configs/test.yaml'
+
+    try:
+        with open(test_yaml_path, errors='ignore', encoding='utf-8') as f:
+            s = f.read()
+            if not s.isprintable():
+                s = re.sub(r'[^\x09\x0A\x0D\x20-\x7E\x85\xA0-\uD7FF\uE000-\uFFFD\U00010000-\U0010ffff]+', '', s)
+            data = yaml.safe_load(s) or {}
+            data['yaml_file'] = str(test_yaml_path)
+
+        yaml_parent = Path(test_yaml_path).parent
+        data_root = Path(data.get('path', yaml_parent)).resolve()
+
+        train_paths = []
+        if 'train' in data and isinstance(data['train'], list):
+            for p in data['train']:
+                path = Path(p)
+                if not path.is_absolute():
+                    path = (data_root / p).resolve()
+                train_paths.append(str(path))
+        else:
+            LOGGER.error("Multi-dataset training requires 'train' to be a list of paths in the YAML.")
+            exit()
+
+        val_path = []
+        if 'val' in data and isinstance(data['val'], list):
+            for p in data['val']:
+                path = Path(p)
+                if not path.is_absolute():
+                    path = (data_root / p).resolve()
+                val_path.append(str(path))
+
+        train_dataset = YOLODataset(
+            img_path=train_paths,
+            imgsz=640,
+            batch_size=16,
+            augment=True,
+            # hyp=DEFAULT_CFG,
+            rect=False,
+            cache='ram',
+            data=data,
+            prefix='Train: '
+        )
+
+        train_weights = data.get('weights', [1.0] * len(train_paths))
+        if len(train_weights) != len(train_paths):
+            LOGGER.warning(f"Number of weights ({len(train_weights)}) does not match number of train datasets ({len(train_paths)}). Using equal weights.")
+            train_weights = [1.0] * len(train_paths)
+
+        if not hasattr(train_dataset, 'dataset_indices') or not hasattr(train_dataset, 'dataset_lens'):
+            raise RuntimeError("Dataset object missing required attributes for weighted sampling. Check initialization.")
+        if len(train_dataset.dataset_indices) != len(train_paths):
+            LOGGER.error(f"Mismatch after dataset init: {len(train_dataset.dataset_indices)} indices vs {len(train_paths)} paths.")
+
+        train_sampler = WeightedMultiDatasetSampler(
+            dataset_indices=train_dataset.dataset_indices,
+            dataset_lens=train_dataset.dataset_lens,
+            dataset_weights=train_weights,
+            num_samples=len(train_dataset)
+        )
+
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=16,
+            shuffle=False,
+            num_workers=8,
+            sampler=train_sampler,
+            pin_memory=True,
+            collate_fn=YOLODataset.collate_fn
+        )
+
+        print(f"Combined Training Dataset Size: {len(train_dataset)}")
+        print(f"Sampler will yield {len(train_sampler)} indices per epoch.")
+        print(f"Dataset lengths: {train_dataset.dataset_lens}")
+        print(f"Dataset start indices: {train_dataset.dataset_indices}")
+        print(f"Dataset weights: {train_weights}")
+        print(f"Dataset probabilities: {train_sampler.dataset_probs}")
+
+        num_batches_to_show = 5
+        for i, batch in enumerate(train_loader):
+            if i >= num_batches_to_show:
+                break
+            print(f"\nBatch {i+1}:")
+            print(f"  Image shape: {batch['img'].shape}")
+            print(f"  Labels batch_idx unique values: {torch.unique(batch['batch_idx'])}")
+
+        if val_path:
+            val_dataset = YOLODataset(
+                img_path=val_path,
+                imgsz=640,
+                batch_size=16,
+                augment=False,
+                # hyp=DEFAULT_CFG,
+                rect=True,
+                cache='ram',
+                data=data,
+                prefix='Val: '
+            )
+            val_loader = DataLoader(
+                val_dataset,
+                batch_size=16,
+                shuffle=False,
+                num_workers=8,
+                pin_memory=True,
+                collate_fn=YOLODataset.collate_fn
+            )
+            print(f"\nValidation Dataset Size: {len(val_dataset)}")
+
+    except FileNotFoundError:
+        print(f"Error: YAML file not found at {test_yaml_path}")
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        import traceback
+        traceback.print_exc()
+

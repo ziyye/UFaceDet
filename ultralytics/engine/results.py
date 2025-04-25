@@ -250,6 +250,7 @@ class Results(SimpleClass):
         # Plot Classify results
         if pred_probs is not None and show_probs:
             text = ',\n'.join(f'{names[j] if names else j} {pred_probs.data[j]:.2f}' for j in pred_probs.top5)
+            # text = f'{names[pred_probs.top1]} {pred_probs.data[pred_probs.top1]:.2f}'
             x = round(self.orig_shape[0] * 0.03)
             annotator.text([x, x], text, txt_color=(255, 255, 255))  # TODO: allow setting colors
 
@@ -303,6 +304,7 @@ class Results(SimpleClass):
                     kpt = torch.cat((kpts[j].xyn, kpts[j].conf[..., None]), 2) if kpts[j].has_visible else kpts[j].xyn
                     line += (*kpt.reshape(-1).tolist(), )
                 line += (conf, ) * save_conf + (() if id is None else (id, ))
+                # if c == 0:
                 texts.append(('%g ' * len(line)).rstrip() % line)
 
         if texts:
@@ -436,6 +438,7 @@ class Boxes(BaseTensor):
     def xywhn(self):
         """Return the boxes in xywh format normalized by original image size."""
         xywh = ops.xyxy2xywh(self.xyxy)
+        # xywh = ops.xyxy2xywh2(self.xyxy)
         xywh[..., [0, 2]] /= self.orig_shape[1]
         xywh[..., [1, 3]] /= self.orig_shape[0]
         return xywh

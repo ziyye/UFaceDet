@@ -1,0 +1,41 @@
+
+# Train/val/test sets as 1) dir: path/to/imgs, 2) file: path/to/imgs.txt, or 3) list: [path/to/imgs1, path/to/imgs2, ..]
+# path: /mnt/pai-storage-8/tianyuan/facedet/sqyolov8/dataset  # dataset root dir
+train: 
+      [
+      /mnt/pai-storage-12/data/Facedetect_data/yolo-face_data/widerface/train,
+      /mnt/pai-storage-12/data/Facedetect_data/yolo-face_data/MAFA/train,
+      # /mnt/pai-storage-12/data/Facedetect_data/yolo-face_data/Celeba/train,
+      /mnt/pai-storage-12/data/qrcode_data/qrcode/public_1/train,
+      ]                        
+      # [
+      # 'Celeba/train',             10000
+      # 'MAFA/train',               10000
+      # 'shangchao_data/train',     20000
+      # 'Uface/train',              50000
+      # 'Uface_register/train',     10000
+      # 'widerface/train',          12682*8
+      # 'hand/train',               4915*3
+      # 'background/train'          4358
+      # 'animals/train'             5778*4
+      # ]  
+        
+        
+val: [/mnt/pai-storage-12/data/qrcode_data/qrcode/public_1/val,]
+
+        # [
+        # 'Celeba/val',               600
+        # 'MAFA/val',                 600
+        # 'shangchao_data/val',       600
+        # 'Uface/val',                1200
+        # 'Uface_register/val',       200
+        # 'widerface/val',            1200
+        # ]  
+
+weights: [0.5, 0.3, 0.8]
+# Classes
+names:
+  0: face
+  1: qrcode
+
+

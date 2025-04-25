@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 from torch.nn.init import constant_, xavier_uniform_
 
-from ultralytics.utils.tal import TORCH_1_10, dist2bbox, make_anchors
+from ultralytics.utils.tal import TORCH_1_10, dist2bbox, make_anchors,dist2bbox2
 
 from .block import DFL, Proto
 from .conv import Conv
@@ -30,7 +30,8 @@ class Detect(nn.Module):
         super().__init__()
         self.nc = nc  # number of classes
         self.nl = len(ch)  # number of detection layers
-        self.reg_max = 16  # DFL channels (ch[0] // 16 to scale 4/8/12/16/20 for n/s/m/l/x)
+        # self.reg_max = 16  # DFL channels (ch[0] // 16 to scale 4/8/12/16/20 for n/s/m/l/x)
+        self.reg_max = 1  # DFL channels (ch[0] // 16 to scale 4/8/12/16/20 for n/s/m/l/x)
         self.no = nc + self.reg_max * 4  # number of outputs per anchor
         self.stride = torch.zeros(self.nl)  # strides computed during build
         c2, c3 = max((16, ch[0] // 4, self.reg_max * 4)), max(ch[0], min(self.nc, 100))  # channels
@@ -42,14 +43,36 @@ class Detect(nn.Module):
     def forward(self, x):
         """Concatenates and returns predicted bounding boxes and class probabilities."""
         shape = x[0].shape  # BCHW
+        box0 = []
+        cls0 = []
         for i in range(self.nl):
-            x[i] = torch.cat((self.cv2[i](x[i]), self.cv3[i](x[i])), 1)
+            box0.append(self.cv2[i](x[i]).view(shape[0], self.reg_max * 4, -1))
+            cls0.append(self.cv3[i](x[i]).view(shape[0], self.nc, -1))
+            x[i] = torch.cat((self.cv2[i](x[i]), self.cv3[i](x[i])), 1)           
         if self.training:
             return x
+        
         elif self.dynamic or self.shape != shape:
             self.anchors, self.strides = (x.transpose(0, 1) for x in make_anchors(x, self.stride, 0.5))
             self.shape = shape
-
+        # ----------change----------
+        if self.export and self.format in ('saved_model', 'onnx'):
+            # return x    
+            x_cat = torch.cat([xi.view(shape[0], self.no, -1) for xi in x], 2)
+            box, cls = x_cat.split((self.reg_max * 4, self.nc), 1)
+            dbox = dist2bbox(self.dfl(box), self.anchors.unsqueeze(0), xywh=False, dim=1) * self.strides
+            cls = cls.sigmoid()
+            box2 = torch.cat(box0, 2)
+            cls2 = torch.cat(cls0, 2)
+            dbox2 = dist2bbox(self.dfl(box2), self.anchors.unsqueeze(0), xywh=False, dim=1) * self.strides
+            # dbox2 = box2
+            # cls2 = cls2.sigmoid()
+            dbox2 = dbox2.transpose(2,1)
+            cls2 = cls2.transpose(2,1)
+            # return dbox,cls
+            # return box2,cls2     
+            return dbox2,cls2     
+        # ----------change----------
         x_cat = torch.cat([xi.view(shape[0], self.no, -1) for xi in x], 2)
         if self.export and self.format in ('saved_model', 'pb', 'tflite', 'edgetpu', 'tfjs'):  # avoid TF FlexSplitV ops
             box = x_cat[:, :self.reg_max * 4]

@@ -147,7 +147,8 @@ class BasePredictor:
             (list): A list of transformed images.
         """
         same_shapes = all(x.shape == im[0].shape for x in im)
-        letterbox = LetterBox(self.imgsz, auto=same_shapes and self.model.pt, stride=self.model.stride)
+        # letterbox = LetterBox(self.imgsz, auto=same_shapes and self.model.pt, stride=self.model.stride)
+        letterbox = LetterBox(self.imgsz, auto=False, stride=self.model.stride)
         return [letterbox(image=x) for x in im]
 
     def write_results(self, idx, results, batch):
@@ -166,7 +167,7 @@ class BasePredictor:
         log_string += '%gx%g ' % im.shape[2:]  # print string
         result = results[idx]
         log_string += result.verbose()
-
+        print(log_string)
         if self.args.save or self.args.show:  # Add bbox to image
             plot_args = {
                 'line_width': self.args.line_width,
@@ -176,6 +177,13 @@ class BasePredictor:
             if not self.args.retina_masks:
                 plot_args['im_gpu'] = im[idx]
             self.plotted_img = result.plot(**plot_args)
+            # -------------change code-------------
+            # xyxy = result.boxes.xyxy.tolist()
+            # for box in xyxy:
+            #     x1, y1, x2, y2 = [int(x) for x in box]
+            #     result.orig_img[y1:y2, x1:x2] = 0
+            # self.plotted_img = result.orig_img
+            # -------------change code-------------
         # Write
         if self.args.save_txt:
             result.save_txt(f'{self.txt_path}.txt', save_conf=self.args.save_conf)
@@ -210,8 +218,9 @@ class BasePredictor:
     def setup_source(self, source):
         """Sets up source and inference mode."""
         self.imgsz = check_imgsz(self.args.imgsz, stride=self.model.stride, min_dim=2)  # check image size
-        self.transforms = getattr(self.model.model, 'transforms', classify_transforms(
-            self.imgsz[0])) if self.args.task == 'classify' else None
+        # self.transforms = getattr(self.model.model, 'transforms', classify_transforms(
+        #     self.imgsz[0])) if self.args.task == 'classify' else None
+        self.transforms =  classify_transforms(self.imgsz[0]) if self.args.task == 'classify' else None
         self.dataset = load_inference_source(source=source,
                                              imgsz=self.imgsz,
                                              vid_stride=self.args.vid_stride,
@@ -291,8 +300,8 @@ class BasePredictor:
                 yield from self.results
 
                 # Print time (inference-only)
-                if self.args.verbose:
-                    LOGGER.info(f'{s}{profilers[1].dt * 1E3:.1f}ms')
+                # if self.args.verbose:
+                #     LOGGER.info(f'{s}{profilers[1].dt * 1E3:.1f}ms')
 
         # Release assets
         if isinstance(self.vid_writer[-1], cv2.VideoWriter):
@@ -339,7 +348,8 @@ class BasePredictor:
         im0 = self.plotted_img
         # Save imgs
         if self.dataset.mode == 'image':
-            cv2.imwrite(save_path, im0)
+            if self.results[0].boxes:
+                cv2.imwrite(save_path, im0)
         else:  # 'video' or 'stream'
             if self.vid_path[idx] != save_path:  # new video
                 self.vid_path[idx] = save_path

@@ -114,6 +114,7 @@ class BaseDataset(Dataset):
                 else:
                     raise FileNotFoundError(f'{self.prefix}{p} does not exist')
             im_files = sorted(x.replace('/', os.sep) for x in f if x.split('.')[-1].lower() in IMG_FORMATS)
+            random.shuffle(im_files)
             # self.img_files = sorted([x for x in f if x.suffix[1:].lower() in IMG_FORMATS])  # pathlib
             assert im_files, f'{self.prefix}No images found in {img_path}'
         except Exception as e:

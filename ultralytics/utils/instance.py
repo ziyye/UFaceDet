@@ -30,7 +30,37 @@ _formats = ['xyxy', 'xywh', 'ltwh']
 
 __all__ = 'Bboxes',  # tuple or list
 
+def box_iou(boxes1, boxes2):
+    """
+    计算两组边界框之间的IoU (Intersection over Union)。
 
+    参数:
+        boxes1 (numpy.ndarray): 第一组边界框,形状为(N,4),格式为xyxy
+        boxes2 (numpy.ndarray): 第二组边界框,形状为(N,4),格式为xyxy
+
+    返回:
+        numpy.ndarray: IoU值数组,形状为(N,)
+    """
+    # 计算交集区域的左上角和右下角坐标
+    x1 = np.maximum(boxes1[:, 0], boxes2[:, 0])
+    y1 = np.maximum(boxes1[:, 1], boxes2[:, 1]) 
+    x2 = np.minimum(boxes1[:, 2], boxes2[:, 2])
+    y2 = np.minimum(boxes1[:, 3], boxes2[:, 3])
+
+    # 计算交集区域面积
+    intersection = np.maximum(0, x2 - x1) * np.maximum(0, y2 - y1)
+
+    # 计算两个框的面积
+    area1 = (boxes1[:, 2] - boxes1[:, 0]) * (boxes1[:, 3] - boxes1[:, 1])
+    area2 = (boxes2[:, 2] - boxes2[:, 0]) * (boxes2[:, 3] - boxes2[:, 1])
+
+    # 计算并集面积
+    union = area1 + area2 - intersection
+
+    # 计算IoU
+    iou = intersection / union
+
+    return iou
 class Bboxes:
     """
     A class for handling bounding boxes.
@@ -348,7 +378,18 @@ class Instances:
         if self.keypoints is not None:
             self.keypoints[..., 0] = self.keypoints[..., 0].clip(0, w)
             self.keypoints[..., 1] = self.keypoints[..., 1].clip(0, h)
-
+    
+    def remove_iou_thresh_boxes(self,w,h,iou_thresh=0.5):
+        crop_boxes = self.bboxes.copy()
+        crop_boxes[:, [0, 2]] = crop_boxes[:, [0, 2]].clip(0, w)
+        crop_boxes[:, [1, 3]] = crop_boxes[:, [1, 3]].clip(0, h)
+        iou = box_iou(crop_boxes, self.bboxes)
+        iou_mask = iou > iou_thresh
+        good = self.bbox_areas > 0
+        condition = good & iou_mask
+        # self._bboxes = self._bboxes[condition]
+        return condition
+    
     def remove_zero_area_boxes(self):
         """
         Remove zero-area boxes, i.e. after clipping some boxes may have zero width or height.
@@ -361,7 +402,7 @@ class Instances:
             if len(self.segments):
                 self.segments = self.segments[good]
             if self.keypoints is not None:
-                self.keypoints = self.keypoints[good]
+                self.keypoints = self.keypoints[good]        
         return good
 
     def update(self, bboxes, segments=None, keypoints=None):

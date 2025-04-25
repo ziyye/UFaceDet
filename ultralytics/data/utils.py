@@ -33,6 +33,14 @@ def img2label_paths(img_paths):
     """Define label paths as a function of image paths."""
     sa, sb = f'{os.sep}images{os.sep}', f'{os.sep}labels{os.sep}'  # /images/, /labels/ substrings
     return [sb.join(x.rsplit(sa, 1)).rsplit('.', 1)[0] + '.txt' for x in img_paths]
+    # label_dir_train = '/mnt/pai-storage-12/data/person_face/labels_train'
+    # label_dir_val = '/mnt/pai-storage-12/data/person_face/labels_val'
+    # label_dir_train = '/mnt/pai-storage-1/tianyuan/workspace/facedet/sqyolov8/test_imgs/test_data/labels'
+    # label_dir_val = '/mnt/pai-storage-1/tianyuan/workspace/facedet/sqyolov8/test_imgs/test_data/labels'
+    # if 'train' in img_paths[0]:
+    #     return [os.path.join(label_dir_train,os.path.basename(x).rsplit('.', 1)[0]+'.txt') for x in img_paths]
+    # else:
+    #     return [os.path.join(label_dir_val,os.path.basename(x).rsplit('.', 1)[0]+'.txt') for x in img_paths]
 
 
 def get_hash(paths):
@@ -66,6 +74,7 @@ def verify_image(args):
         im.verify()  # PIL verify
         shape = exif_size(im)  # image size
         shape = (shape[1], shape[0])  # hw
+        w,h =  (shape[0], shape[1])# hw
         assert (shape[0] > 9) & (shape[1] > 9), f'image size {shape} <10 pixels'
         assert im.format.lower() in IMG_FORMATS, f'invalid image format {im.format}'
         if im.format.lower() in ('jpg', 'jpeg'):
@@ -92,6 +101,8 @@ def verify_image_label(args):
         im.verify()  # PIL verify
         shape = exif_size(im)  # image size
         shape = (shape[1], shape[0])  # hw
+        w,h = (shape[1], shape[0])
+        # pt= 0.01875 # pix_threshold
         assert (shape[0] > 9) & (shape[1] > 9), f'image size {shape} <10 pixels'
         assert im.format.lower() in IMG_FORMATS, f'invalid image format {im.format}'
         if im.format.lower() in ('jpg', 'jpeg'):
@@ -105,12 +116,14 @@ def verify_image_label(args):
         if os.path.isfile(lb_file):
             nf = 1  # label found
             with open(lb_file) as f:
-                lb = [x.split() for x in f.read().strip().splitlines() if len(x)]
-                if any(len(x) > 6 for x in lb) and (not keypoint):  # is segment
-                    classes = np.array([x[0] for x in lb], dtype=np.float32)
-                    segments = [np.array(x[1:], dtype=np.float32).reshape(-1, 2) for x in lb]  # (cls, xy1...)
-                    lb = np.concatenate((classes.reshape(-1, 1), segments2boxes(segments)), 1)  # (cls, xywh)
+                lb = [x.split()[:5] for x in f.read().strip().splitlines() if len(x)]
+                # if any(len(x) > 6 for x in lb) and (not keypoint):  # is segment
+                #     classes = np.array([x[0] for x in lb], dtype=np.float32)
+                #     segments = [np.array(x[1:], dtype=np.float32).reshape(-1, 2) for x in lb]  # (cls, xy1...)
+                #     lb = np.concatenate((classes.reshape(-1, 1), segments2boxes(segments)), 1)  # (cls, xywh)
                 lb = np.array(lb, dtype=np.float32)
+                # condition = (lb[:, 3] >= pt) & (lb[:, 4] >= pt)
+                # lb = lb[condition]
             nl = len(lb)
             if nl:
                 if keypoint:
@@ -323,7 +336,7 @@ def check_det_dataset(dataset, autodownload=True):
             dt = f'({round(time.time() - t, 1)}s)'
             s = f"success ✅ {dt}, saved to {colorstr('bold', DATASETS_DIR)}" if r in (0, None) else f'failure {dt} ❌'
             LOGGER.info(f'Dataset download {s}\n')
-    check_font('Arial.ttf' if is_ascii(data['names']) else 'Arial.Unicode.ttf')  # download fonts
+    # check_font('Arial.ttf' if is_ascii(data['names']) else 'Arial.Unicode.ttf')  # download fonts
 
     return data  # dictionary
 

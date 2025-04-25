@@ -109,7 +109,7 @@ def scale_boxes(img1_shape, boxes, img0_shape, ratio_pad=None, padding=True):
         boxes[..., [0, 2]] -= pad[0]  # x padding
         boxes[..., [1, 3]] -= pad[1]  # y padding
     boxes[..., :4] /= gain
-    clip_boxes(boxes, img0_shape)
+    clip_boxes(boxes, img0_shape) # change
     return boxes
 
 
@@ -354,6 +354,18 @@ def xyxy2xywh(x):
     y[..., 1] = (x[..., 1] + x[..., 3]) / 2  # y center
     y[..., 2] = x[..., 2] - x[..., 0]  # width
     y[..., 3] = x[..., 3] - x[..., 1]  # height
+    return y
+
+def xyxy2xywh2(x):
+    """
+    自定义检测区域剪切比例，是否外扩，外扩系数
+    """
+    assert x.shape[-1] == 4, f'input shape last dimension expected 4 but input shape is {x.shape}'
+    y = torch.empty_like(x) if isinstance(x, torch.Tensor) else np.empty_like(x)  # faster than clone/copy
+    y[..., 0] = (x[..., 0] + x[..., 2]) / 2  # x center
+    y[..., 1] = (x[..., 1] + x[..., 3]) / 2  # y center
+    y[..., 2] = 2*(x[..., 2] - x[..., 0]) # width
+    y[..., 3] = 2*(x[..., 3] - x[..., 1])  # height
     return y
 
 

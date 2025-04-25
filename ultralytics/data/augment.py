@@ -8,6 +8,7 @@ import cv2
 import numpy as np
 import torch
 import torchvision.transforms as T
+from torchvision.transforms import ToTensor
 
 from ultralytics.utils import LOGGER, colorstr
 from ultralytics.utils.checks import check_version
@@ -256,6 +257,13 @@ class Mosaic(BaseMixTransform):
         labels['instances'].convert_bbox(format='xyxy')
         labels['instances'].denormalize(nw, nh)
         labels['instances'].add_padding(padw, padh)
+
+        # #  -------add新增-------
+        # ptr = 8
+        # lbs = labels['instances'].bboxes
+        # condition = (lbs[:, 2]-lbs[:, 0] >= ptr) & (lbs[:, 3]-lbs[:, 1] >= ptr)
+        # labels['instances'].update(lbs[condition])
+        # #  -------add新增-------
         return labels
 
     def _cat_labels(self, mosaic_labels):
@@ -275,9 +283,11 @@ class Mosaic(BaseMixTransform):
             'cls': np.concatenate(cls, 0),
             'instances': Instances.concatenate(instances, axis=0),
             'mosaic_border': self.border}  # final_labels
-        final_labels['instances'].clip(imgsz, imgsz)
-        good = final_labels['instances'].remove_zero_area_boxes()
-        final_labels['cls'] = final_labels['cls'][good]
+        # final_labels['instances'].clip(imgsz, imgsz)
+        condition = final_labels['instances'].remove_iou_thresh_boxes(w = imgsz,h = imgsz)
+        final_labels['instances'] = final_labels['instances'][condition]
+        # good = final_labels['instances'].remove_zero_area_boxes()
+        final_labels['cls'] = final_labels['cls'][condition]
         return final_labels
 
 
@@ -493,8 +503,18 @@ class RandomPerspective:
         # M is affine matrix
         # Scale for func:`box_candidates`
         img, M, scale = self.affine_transform(img, border)
-
+        # img2 = deepcopy(img)
         bboxes = self.apply_bboxes(instances.bboxes, M)
+        # for i in range(len(bboxes)):
+        #     box = [int(b) for b in bboxes[i]]
+        #     cv2.rectangle(img2, (box[0], box[1]), (box[2], box[3]), (0, 0, 255), 2)
+        #     # cv2.putText(img, str(cls[i]), (box[0], box[1]), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+        # cv2.imwrite('test1.jpg',img2)
+
+
+        # -------change更改-------
+        # condition = (bboxes[:, 2] + bboxes[:, 0] > 0) & (bboxes[:, 3] + bboxes[:, 1] >= 0) & (bboxes[:, 2] + bboxes[:, 0] <= self.size[0]*2) & (bboxes[:, 3] + bboxes[:, 1] <= self.size[0]*2)
+        # -------change更改-------
 
         segments = instances.segments
         keypoints = instances.keypoints
@@ -506,14 +526,21 @@ class RandomPerspective:
             keypoints = self.apply_keypoints(keypoints, M)
         new_instances = Instances(bboxes, segments, keypoints, bbox_format='xyxy', normalized=False)
         # Clip
-        new_instances.clip(*self.size)
+        # new_instances.clip(*self.size)
+        condition = new_instances.remove_iou_thresh_boxes(w = self.size[0],h = self.size[1]) # 删除iou小于0.5的框
 
         # Filter instances
         instances.scale(scale_w=scale, scale_h=scale, bbox_only=True)
         # Make the bboxes have the same scale with new_bboxes
         i = self.box_candidates(box1=instances.bboxes.T,
                                 box2=new_instances.bboxes.T,
+                                # wh_thr = int(self.size[0]*0.01875), # 默认为2，12为640尺寸下的阈值 
+                                wh_thr = int(self.size[0]*0.0125), # 默认为2，12为640尺寸下的阈值 
                                 area_thr=0.01 if len(segments) else 0.10)
+        # -------change更改-------
+        i = i & condition
+        # -------change更改-------
+
         labels['instances'] = new_instances[i]
         labels['cls'] = cls[i]
         labels['img'] = img
@@ -816,17 +843,25 @@ class Albumentations:
         im = labels['img']
         cls = labels['cls']
         if len(cls):
+            bboxes = labels['instances'].bboxes
+            bboxes = bboxes.clip(0,640)
+            bboxes_A = np.empty_like(bboxes) 
+            bboxes_A[..., 0] = (bboxes[..., 0] + bboxes[..., 2]) / 2  # x center
+            bboxes_A[..., 1] = (bboxes[..., 1] + bboxes[..., 3]) / 2  # y center
+            bboxes_A[..., 2] = bboxes[..., 2] - bboxes[..., 0]  # width
+            bboxes_A[..., 3] = bboxes[..., 3] - bboxes[..., 1]  # height
+            bboxes_A = bboxes_A/640
             labels['instances'].convert_bbox('xywh')
             labels['instances'].normalize(*im.shape[:2][::-1])
-            bboxes = labels['instances'].bboxes
+            # bboxes = labels['instances'].bboxes
             # TODO: add supports of segments and keypoints
             if self.transform and random.random() < self.p:
-                new = self.transform(image=im, bboxes=bboxes, class_labels=cls)  # transformed
+                new = self.transform(image=im, bboxes=bboxes_A, class_labels=cls)  # transformed
                 if len(new['class_labels']) > 0:  # skip update if no bbox in new im
                     labels['img'] = new['image']
                     labels['cls'] = np.array(new['class_labels'])
-                    bboxes = np.array(new['bboxes'], dtype=np.float32)
-            labels['instances'].update(bboxes=bboxes)
+                    # bboxes = np.array(new['bboxes'], dtype=np.float32)
+            # labels['instances'].update(bboxes=bboxes)
         return labels
 
 
@@ -915,6 +950,187 @@ class Format:
         return masks, instances, cls
 
 
+class RandomErasing:
+    """
+    Applies Random Erasing to an image with a given probability.
+    """
+
+    def __init__(self, p=0.5, scale=(0.02, 0.33), ratio=(0.3, 3.3), value=0):
+        """
+        Initializes the RandomErasing class with probability and parameters.
+
+        Args:
+            p (float, optional): The probability of applying the random erasing. Default is 0.5.
+            scale (tuple, optional): Range of proportion of erased area against input image. Default is (0.02, 0.33).
+            ratio (tuple, optional): Range of aspect ratio of erased area. Default is (0.3, 3.3).
+            value (int, optional): Erasing value. Default is 0 (black).
+        """
+        self.p = p
+        self.transform = T.RandomErasing(p=p, scale=scale, ratio=ratio, value=value)
+
+    def __call__(self, labels):
+        """
+        Applies random erasing to an image.
+
+        Args:
+            labels (dict): A dictionary containing the key 'img'. 'img' is the image to be augmented.
+
+        Returns:
+            (dict): The same dict with the augmented image under the 'img' key.
+        """
+        img = labels['img']
+        h, w = img.shape[0], img.shape[1]
+        for box in labels['instances'].bboxes:
+            x1, y1, x2, y2 = box*np.array([w, h, w, h])
+            im = img[int(y1):int(y2), int(x1):int(x2), :]
+            im = torch.from_numpy(im.transpose(2, 0, 1))
+            im = self.transform(im)
+            img[int(y1):int(y2), int(x1):int(x2),:] = im.numpy().transpose(1, 2, 0)
+        labels['img'] = img
+        return labels
+
+
+class ConditionalBrightness:
+    """如果存在特定类标签，则仅对这些标签对应的边界框区域应用随机亮度增强。"""
+    def __init__(self, brightness_factor_range=(1.0, 1.5), target_cls_index=1, p=0.5, save_limit=10):
+        """
+        初始化 ConditionalBrightness 变换。
+
+        Args:
+            brightness_factor_range (tuple): 随机亮度因子的范围 (最小值, 最大值)。
+                                            因子 > 1.0 会增加亮度。
+            target_cls_index (int): 触发亮度增强的类索引。
+            p (float): 应用此变换的概率。
+            save_limit (int): 保存示例图像的最大数量。
+        """
+        assert brightness_factor_range[0] >= 0 and brightness_factor_range[1] >= brightness_factor_range[0], \
+            "brightness_factor_range 必须是 (min, max) 且 max >= min >= 0。"
+        self.brightness_factor_range = brightness_factor_range
+        self.target_cls_index = target_cls_index
+        self.p = p
+        self.save_limit = save_limit # 保存限制
+        self.save_count = 0 # 初始化计数器
+
+    def __call__(self, labels):
+        """
+        将变换应用于 labels 字典。
+
+        Args:
+            labels (dict): 包含图像 ('img')、类别 ('cls')、实例 ('instances') 等的字典。
+
+        Returns:
+            dict: 可能被修改后的 labels 字典。
+        """
+        # 检查是否存在目标类别，并根据概率决定是否应用增强
+        if random.random() < self.p and self.target_cls_index in labels.get('cls', []):
+            im = labels['img']
+            instances = labels.get('instances')
+            cls = labels.get('cls')
+
+            if instances is None or cls is None:
+                LOGGER.warning("ConditionalBrightness: 'instances' or 'cls' not found in labels. Skipping.")
+                return labels
+
+            # --- 新增：保存原始图像 ---
+            # if self.save_count < self.save_limit:
+            #     original_save_path = f"original_brightness_roi_example_{self.save_count}.jpg"
+            #     # 确保图像是 BGR uint8 格式以便保存
+            #     im_to_save = im
+            #     if im_to_save.dtype != np.uint8:
+            #         if im_to_save.max() <= 1.0 and im_to_save.min() >= 0.0:
+            #             im_to_save = (im_to_save * 255).astype(np.uint8)
+            #         else:
+            #             im_to_save = im_to_save.astype(np.uint8)
+            #     cv2.imwrite(original_save_path, im_to_save)
+            #     LOGGER.info(f"Saved original image example to {original_save_path}")
+            # --- 新增结束 ---
+
+
+            # 确保图像是 uint8 类型以便进行 HSV 转换
+            if im.dtype != np.uint8:
+                 # 假设图像是 float [0, 1]，缩放到 [0, 255]
+                 if im.max() <= 1.0 and im.min() >= 0.0:
+                     im = (im * 255).astype(np.uint8)
+                 else: # 或者如果已经是 [0, 255] 范围但类型是 float
+                     im = im.astype(np.uint8)
+
+            # 选择一个随机亮度因子
+            factor = random.uniform(self.brightness_factor_range[0], self.brightness_factor_range[1])
+
+            if factor != 1.0: # 仅当因子不是 1.0 时应用
+                h_img, w_img = im.shape[:2]
+                # --- 修改：假设 instances.bboxes 是归一化的 xywh 格式 ---
+                # 复制一份以避免修改原始数据
+                bboxes_normalized_xywh = instances.bboxes.copy()
+                # --- 修改结束 ---
+
+                img_changed = False # 标记图像是否被修改
+                # --- 修改：迭代处理归一化的 xywh 边界框 ---
+                for i, bbox_norm_xywh in enumerate(bboxes_normalized_xywh):
+                    if cls[i] == self.target_cls_index:
+                        # --- 新增：将归一化的 xywh 转换为像素坐标的 xyxy ---
+                        cx, cy, bw, bh = bbox_norm_xywh
+                        # 反归一化
+                        cx_pix, cy_pix = cx * w_img, cy * h_img
+                        bw_pix, bh_pix = bw * w_img, bh * h_img
+                        # 转换为 xyxy
+                        x1 = cx_pix - bw_pix / 2
+                        y1 = cy_pix - bh_pix / 2
+                        x2 = cx_pix + bw_pix / 2
+                        y2 = cy_pix + bh_pix / 2
+                        # --- 新增结束 ---
+
+                        # 获取边界框坐标 (现在是像素坐标 xyxy)
+                        x1, y1, x2, y2 = map(int, [x1, y1, x2, y2])
+                        # 裁剪坐标到图像边界内
+                        x1, y1 = max(0, x1), max(0, y1)
+                        x2, y2 = min(w_img, x2), min(h_img, y2)
+                        # cv2.rectangle(im, (x1, y1), (x2, y2), (0, 0, 255), 2)
+                        # 检查边界框是否有效
+                        if x1 < x2 and y1 < y2:
+                            try:
+                                # 提取 ROI (Region of Interest)
+                                roi = im[y1:y2, x1:x2]
+                                if roi.size == 0: # 跳过空的 ROI
+                                    continue
+
+                                # 转换 ROI 到 HSV
+                                hsv_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+                                h_roi, s_roi, v_roi = cv2.split(hsv_roi)
+
+                                # 将亮度因子应用于 V 通道，并裁剪到 0-255 范围
+                                v_roi_float = v_roi.astype(np.float32) * factor
+                                v_roi = np.clip(v_roi_float, 0, 255).astype(hsv_roi.dtype) # 裁剪后确保类型正确
+
+                                # 合并通道并转换回 BGR
+                                final_hsv_roi = cv2.merge((h_roi, s_roi, v_roi))
+                                augmented_roi = cv2.cvtColor(final_hsv_roi, cv2.COLOR_HSV2BGR)
+
+                                # 将增强后的 ROI 放回原图
+                                im[y1:y2, x1:x2] = augmented_roi
+                                img_changed = True
+
+                            except cv2.error as e:
+                                LOGGER.warning(f"ConditionalBrightness: Skipping augmentation for bbox {i} due to cv2 error: {e}")
+                            except Exception as e: # 捕获其他潜在错误
+                                LOGGER.warning(f"ConditionalBrightness: Skipping augmentation for bbox {i} due to error: {e}")
+                # --- 修改结束 ---
+
+
+                if img_changed:
+                    labels['img'] = im # 更新 labels 中的图像
+
+                    # --- 保存示例图像 ---
+                    if self.save_count < self.save_limit:
+                        save_path = f"./Brightness_adjustment/augmented_brightness_roi_example_{self.save_count}.jpg"
+                        cv2.imwrite(save_path, im) # 保存修改后的完整图像
+                        LOGGER.info(f"Saved augmented brightness ROI example to {save_path}")
+                        self.save_count += 1 # 注意：计数器在这里增加
+                    # --- 保存结束 ---
+
+        return labels
+
+
 def v8_transforms(dataset, imgsz, hyp, stretch=False):
     """Convert images to a size suitable for YOLOv8 training."""
     pre_transform = Compose([
@@ -937,13 +1153,26 @@ def v8_transforms(dataset, imgsz, hyp, stretch=False):
         elif flip_idx and (len(flip_idx) != kpt_shape[0]):
             raise ValueError(f'data.yaml flip_idx={flip_idx} length must be equal to kpt_shape[0]={kpt_shape[0]}')
 
+    # --- 新增：定义二维码类别索引和亮度增强参数 ---
+    qrcode_cls_index = 1 # 假设二维码的类别索引是 1
+    brightness_range = (5.0, 8.0) # 亮度增强范围（1.0 到 1.5 倍）
+    brightness_p = 0.5 # 当图像包含二维码时，应用此增强的概率为 50%
+    # --- 新增结束 ---
+
     return Compose([
         pre_transform,
         MixUp(dataset, pre_transform=pre_transform, p=hyp.mixup),
         Albumentations(p=1.0),
         RandomHSV(hgain=hyp.hsv_h, sgain=hyp.hsv_s, vgain=hyp.hsv_v),
+        # --- 新增：添加条件亮度增强 ---
+        ConditionalBrightness(brightness_factor_range=brightness_range,
+                              target_cls_index=qrcode_cls_index,
+                              p=brightness_p),
+        # --- 新增结束 ---
         RandomFlip(direction='vertical', p=hyp.flipud),
-        RandomFlip(direction='horizontal', p=hyp.fliplr, flip_idx=flip_idx)])  # transforms
+        RandomFlip(direction='horizontal', p=hyp.fliplr, flip_idx=flip_idx),
+        # RandomErasing(p=0.5)  # 添加随机擦除
+    ])  # transforms
 
 
 # Classification augmentations -----------------------------------------------------------------------------------------

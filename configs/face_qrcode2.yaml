@@ -1,0 +1,59 @@
+# Train/val/test sets as 1) dir: path/to/imgs, 2) file: path/to/imgs.txt, or 3) list: [path/to/imgs1, path/to/imgs2, ..]
+# path: /mnt/pai-storage-8/tianyuan/facedet/sqyolov8/dataset  # dataset root dir
+train: 
+      [
+      /mnt/pai-storage-12/data/Facedetect_data/yolo-face_data/widerface/train,
+      /mnt/pai-storage-12/data/Facedetect_data/yolo-face_data/MAFA/train,
+      /mnt/pai-storage-12/data/Facedetect_data/yolo-face_data/Celeba/train,
+      /mnt/pai-storage-12/data/Facedetect_data/yolo-face_data/shangchao_data/train,
+      /mnt/pai-storage-12/data/Facedetect_data/yolo-face_data/Uface/train,
+      /mnt/pai-storage-12/data/Facedetect_data/yolo-face_data/Uface_register/train,
+      /mnt/pai-storage-12/data/Facedetect_data/yolo-face_data/hand/train,
+      /mnt/pai-storage-12/data/Facedetect_data/yolo-face_data/background/train,
+      /mnt/pai-storage-12/data/Facedetect_data/yolo-face_data/animals/train,
+      /mnt/pai-storage-12/data/qrcode_data/qrcode/public_1/train,
+      /mnt/pai-storage-12/data/qrcode_data/qrcode/public_2/train,
+      /mnt/pai-storage-12/data/qrcode_data/qrcode/synthetise/train
+      ]                        
+weights: [
+      5,    # widerface
+      1,    # MAFA
+      1,    # Celeba
+      2,    # shangchao_data
+      2,    # Uface
+      2,    # Uface_register
+      1,    # hand
+      0.5,  # background
+      1,    # animals
+      2,    # qrcode_public_1
+      2,    # qrcode_public_2
+      2     # qrcode_synthetise
+      ]        
+        
+val: 
+      [
+      # /mnt/pai-storage-12/data/Facedetect_data/yolo-face_data/widerface/val,
+      /mnt/pai-storage-12/data/Facedetect_data/yolo-face_data/MAFA/val,
+      /mnt/pai-storage-12/data/Facedetect_data/yolo-face_data/Celeba/val,
+      /mnt/pai-storage-12/data/Facedetect_data/yolo-face_data/shangchao_data/val,
+      /mnt/pai-storage-12/data/qrcode_data/qrcode/public_1/val,
+      /mnt/pai-storage-12/data/qrcode_data/qrcode/public_2/val,
+      /mnt/pai-storage-12/data/qrcode_data/qrcode/synthetise/val
+      # /mnt/pai-storage-12/data/Facedetect_data/yolo-face_data/Uface/val,
+      # /mnt/pai-storage-12/data/Facedetect_data/yolo-face_data/Uface_register/val,
+      ]
+        # [
+        # 'Celeba/val',               600
+        # 'MAFA/val',                 600
+        # 'shangchao_data/val',       600
+        # 'Uface/val',                1200
+        # 'Uface_register/val',       200
+        # 'widerface/val',            1200
+        # ]  
+
+
+# Classes
+names:
+  0: face
+  1: qrcode
+
