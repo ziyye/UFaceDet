@@ -140,6 +140,8 @@ class YOLODataset(BaseDataset):
 
         for i, dataset_path in enumerate(dataset_paths_to_process):
             current_im_files = im_files_per_dataset[i]
+            # sort current_im_files by file name to ensure same hash if same dataset
+            current_im_files.sort()
             if not current_im_files:
                 LOGGER.warning(f"{self.prefix}WARNING ⚠️ No images found for dataset path: {dataset_path}")
                 self.dataset_lens.append(0)
@@ -152,10 +154,13 @@ class YOLODataset(BaseDataset):
 
             try:
                 cache, exists = load_dataset_cache_file(cache_path), True
-                assert cache['version'] == DATASET_CACHE_VERSION
-                assert cache['hash'] == get_hash(current_label_files + current_im_files)
-            except (FileNotFoundError, AssertionError, AttributeError, TypeError):
-                cache, exists = self.cache_labels(cache_path, current_im_files, current_label_files), False
+                assert cache['version'] == DATASET_CACHE_VERSION, f"Cache version mismatch: {cache['version']} != {DATASET_CACHE_VERSION}"
+                assert cache['hash'] == get_hash(current_label_files + current_im_files), f"Cache hash mismatch: {cache['hash']} != {get_hash(current_label_files + current_im_files)}"
+                LOGGER.info(f"{self.prefix}Rank[{LOCAL_RANK}] INFO Cache loaded for {cache_path}. Note that if file content is changed but file name is the same, the cache will be reused, you MUST delete the cache file manually.")
+            except (FileNotFoundError, AssertionError, AttributeError, TypeError) as e:
+                # if LOCAL_RANK in (-1, 0):
+                LOGGER.warning(f"{self.prefix}Rank[{LOCAL_RANK}] WARNING ⚠️ Cache loading failed for {cache_path}, recreating cache. {e}")
+                cache, exists = self.cache_labels(cache_path, current_im_files, current_label_files), False  # takes long time: "train: Scanning xxx"
 
             nf, nm, ne, nc, n = cache.pop('results')
             if exists and LOCAL_RANK in (-1, 0):
@@ -398,7 +403,7 @@ def load_dataset_cache_file(path):
     """Load an Ultralytics *.cache dictionary from path."""
     import gc
     gc.disable()
-    cache = np.load(str(path), allow_pickle=True).item()
+    cache = np.load(str(path) + '.npy', allow_pickle=True).item()  # because np.save() by default appends a .npy extension to the filename
     gc.enable()
     return cache
 
@@ -408,7 +413,12 @@ def save_dataset_cache_file(prefix, path, x):
     x['version'] = DATASET_CACHE_VERSION
     if is_dir_writeable(path.parent):
         if path.exists():
-            path.unlink()
+            path.unlink()  # Remove old cache
+        try:
+            np.save(str(path), x)  # The np.save() by default appends a .npy extension to the filename if it's not already present.
+            LOGGER.info(f'{prefix}INFO ✅ Cache saved to {path}')
+        except Exception as e:
+            LOGGER.warning(f'{prefix}WARNING ⚠️ Failed to save cache to {path}: {e}')
     else:
         LOGGER.warning(f'{prefix}WARNING ⚠️ Cache directory {path.parent} is not writeable, cache not saved.')
 
@@ -488,7 +498,7 @@ class WeightedMultiDatasetSampler(Sampler):
                 LOGGER.debug(f"Skipping empty dataset index {dataset_idx}")
                 continue
 
-            offset = np.random.randint(0, length)
+            offset = np.random.randint(0, length)  # TODO draw without replacement
             global_index = start_index + offset
             indices.append(global_index)
 

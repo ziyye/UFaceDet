@@ -3,20 +3,84 @@
 import os
 import random
 from pathlib import Path
+import math # Added for DistributedWeightedSamplerWrapper
 
 import numpy as np
 import torch
 from PIL import Image
-from torch.utils.data import dataloader, distributed
+from torch.utils.data import dataloader, distributed, Sampler as TorchSampler # Added Sampler for wrapper base
 
 from ultralytics.data.loaders import (LOADERS, LoadImages, LoadPilAndNumpy, LoadScreenshots, LoadStreams, LoadTensor,
                                       SourceTypes, autocast_list)
 from ultralytics.data.utils import IMG_FORMATS, VID_FORMATS
-from ultralytics.utils import RANK, colorstr
+from ultralytics.utils import RANK, colorstr, LOGGER # Added LOGGER
 from ultralytics.utils.checks import check_file
 
-from .dataset import YOLODataset
+from .dataset import YOLODataset, WeightedMultiDatasetSampler # Added WeightedMultiDatasetSampler
 from .utils import PIN_MEMORY
+
+
+class DistributedWeightedSamplerWrapper(TorchSampler):
+    """
+    Wrapper for a sampler to make it compatible with DDP.
+    It takes all indices from the underlying sampler, optionally shuffles them,
+    and then distributes them among DDP replicas.
+    """
+    def __init__(self, underlying_sampler, num_replicas: int, rank: int, shuffle: bool = True, seed: int = 0, drop_last: bool = False):
+        if rank >= num_replicas or rank < 0:
+            raise ValueError(f"Invalid rank {rank}, num_replicas is {num_replicas}")
+        if num_replicas <= 0:
+            raise ValueError("num_replicas must be a positive integer.")
+
+        self.underlying_sampler = underlying_sampler
+        self.num_replicas = num_replicas
+        self.rank = rank
+        self.epoch = 0
+        self.shuffle = shuffle  # Whether to shuffle the global list from underlying_sampler
+        self.seed = seed
+        self.drop_last = drop_last
+
+        total_size_underlying = len(self.underlying_sampler)
+        if self.drop_last:
+            self.num_samples_per_replica = total_size_underlying // self.num_replicas
+            self.effective_total_size = self.num_samples_per_replica * self.num_replicas
+        else:
+            self.num_samples_per_replica = math.ceil(total_size_underlying / self.num_replicas)
+            self.effective_total_size = self.num_samples_per_replica * self.num_replicas
+            
+    def __iter__(self):
+        indices = list(self.underlying_sampler) # Get all indices for the epoch. len(indices) 30471, len(set(indices)) 13859
+
+        if self.shuffle:
+            g = torch.Generator()
+            g.manual_seed(self.seed + self.epoch)
+            ordering = torch.randperm(len(indices), generator=g).tolist()
+            indices = [indices[i] for i in ordering]
+
+        # Adjust indices to effective_total_size (pad or truncate)
+        if not self.drop_last:
+            if len(indices) < self.effective_total_size: # Pad if shorter
+                indices += indices[:(self.effective_total_size - len(indices))]
+            elif len(indices) > self.effective_total_size: # Truncate if longer
+                 indices = indices[:self.effective_total_size]
+        else: # drop_last
+            indices = indices[:self.effective_total_size] # Truncate to effective_total_size
+
+        # Subsample
+        sharded_indices = indices[self.rank::self.num_replicas]
+        
+        assert len(sharded_indices) == self.num_samples_per_replica, \
+            f"DistributedWeightedSamplerWrapper: len(sharded_indices)={len(sharded_indices)} != self.num_samples_per_replica={self.num_samples_per_replica}"
+
+        return iter(sharded_indices)
+
+    def __len__(self):
+        return self.num_samples_per_replica
+
+    def set_epoch(self, epoch: int):
+        self.epoch = epoch
+        if hasattr(self.underlying_sampler, 'set_epoch'):
+            self.underlying_sampler.set_epoch(epoch)
 
 
 class InfiniteDataLoader(dataloader.DataLoader):
@@ -83,7 +147,8 @@ def build_yolo_dataset(cfg, img_path, batch, data, mode='train', rect=False, str
         batch_size=batch,
         augment=mode == 'train',  # augmentation
         hyp=cfg,  # TODO: probably add a get_hyps_from_cfg function
-        rect=cfg.rect or rect,  # rectangular batches
+        # rect=cfg.rect or rect,  # rectangular batches
+        rect=False,  # TODO wjz just temp
         cache=cfg.cache or None,
         single_cls=cfg.single_cls or False,
         stride=int(stride),
@@ -96,17 +161,95 @@ def build_yolo_dataset(cfg, img_path, batch, data, mode='train', rect=False, str
         fraction=cfg.fraction if mode == 'train' else 1.0)
 
 
-def build_dataloader(dataset, batch, workers, shuffle=True, rank=-1):
+def build_dataloader(dataset, batch_size, workers, shuffle=True, rank=-1):
     """Return an InfiniteDataLoader or DataLoader for training or validation set."""
-    batch = min(batch, len(dataset))
+    batch_size = min(batch_size, len(dataset))
     nd = torch.cuda.device_count()  # number of CUDA devices
-    nw = min([os.cpu_count() // max(nd, 1), batch if batch > 1 else 0, workers])  # number of workers
-    sampler = None if rank == -1 else distributed.DistributedSampler(dataset, shuffle=shuffle)
+    nw = min([os.cpu_count() // max(nd, 1), batch_size if batch_size > 1 else 0, workers])  # number of workers
+    # nw = 1  # TODO wjz  for debug
+    # Using a more informative print statement for number of workers
+    cpu_cores = os.cpu_count()
+    print(f"Using {nw} dataloader workers (specified: {workers}, CPU cores: {cpu_cores}, CUDA devices: {nd}, batch_size: {batch_size})")
+
+    sampler = None
+    shuffle_dataloader_flag = shuffle  # Default shuffle for dataloader
+
+    # Determine if weighted sampler should be used
+    use_weighted_sampler = (
+        isinstance(dataset, YOLODataset) and
+        hasattr(dataset, 'is_multidataset') and dataset.is_multidataset and
+        hasattr(dataset, 'dataset_indices') and hasattr(dataset, 'dataset_lens') and
+        hasattr(dataset, 'data') and bool(dataset.dataset_lens)  # Ensure dataset_lens is not empty and evaluate to bool
+    )
+
+    if use_weighted_sampler:
+        dataset_weights = dataset.data.get('weights')
+        num_datasets_from_lens = len(dataset.dataset_lens)
+
+        if dataset_weights is None or len(dataset_weights) != num_datasets_from_lens:
+            if dataset_weights is not None:
+                LOGGER.warning(
+                    f"WARNING ⚠️ build_dataloader: Mismatched 'weights' length ({len(dataset_weights)}) "
+                    f"and number of datasets ({num_datasets_from_lens}). Using uniform repeat time of 1.0 for all datasets."
+                )
+            dataset_weights = [1.0] * num_datasets_from_lens
+        
+        if all(w == 0 for w in dataset_weights):
+            LOGGER.warning(
+                "WARNING ⚠️ build_dataloader: All dataset_weights (repeat times) are zero. "
+                "The sampler will produce no samples for this epoch."
+            )
+        elif any(w < 0 for w in dataset_weights):
+            LOGGER.error(
+                "ERROR ❌ build_dataloader: Negative dataset_weights (repeat times) detected. "
+                "WeightedMultiDatasetSampler will raise an error."
+            )
+
+        base_weighted_sampler = WeightedMultiDatasetSampler(
+            dataset_indices=dataset.dataset_indices,
+            dataset_lens=dataset.dataset_lens,
+            dataset_weights=dataset_weights,
+        )
+        
+        if rank != -1:  # DDP active
+            if not torch.distributed.is_initialized():
+                # This case should ideally be handled by the training script before calling build_dataloader in DDP mode
+                LOGGER.error("ERROR ❌ build_dataloader: Distributed training requested (rank != -1) but torch.distributed is not initialized.")
+                # Fallback or raise error might be needed, for now, proceed and hope it's caught later or works if single node DDP
+                num_replicas = 1 # Fallback, will not be correct for multi-node DDP
+                effective_rank = 0
+            else:
+                num_replicas = torch.distributed.get_world_size()
+                effective_rank = torch.distributed.get_rank()
+
+            sampler = DistributedWeightedSamplerWrapper(
+                underlying_sampler=base_weighted_sampler,
+                num_replicas=num_replicas,
+                rank=effective_rank, # Use the obtained rank
+                shuffle=shuffle,  # Use main shuffle arg to decide if wrapper shuffles global list
+                # seed is default 0 for wrapper, uses seed + epoch
+                # drop_last can be False by default for samplers usually
+            )
+        else:  # Not DDP
+            sampler = base_weighted_sampler
+        
+        shuffle_dataloader_flag = False  # Sampler handles ordering
+
+    else:  # Not using weighted sampler (e.g., single dataset)
+        if rank != -1:  # DDP active
+            # DistributedSampler infers rank and world_size if DDP is initialized
+            sampler = distributed.DistributedSampler(dataset, shuffle=shuffle)
+            shuffle_dataloader_flag = False
+        else:  # Not DDP
+            sampler = None
+            # shuffle_dataloader_flag remains the original 'shuffle' value
+
     generator = torch.Generator()
-    generator.manual_seed(6148914691236517205 + RANK)
+    generator.manual_seed(6148914691236517205 + RANK) # RANK is -1 for non-DDP, or process rank
+    
     return InfiniteDataLoader(dataset=dataset,
-                              batch_size=batch,
-                              shuffle=shuffle and sampler is None,
+                              batch_size=batch_size,
+                              shuffle=shuffle_dataloader_flag,
                               num_workers=nw,
                               sampler=sampler,
                               pin_memory=PIN_MEMORY,

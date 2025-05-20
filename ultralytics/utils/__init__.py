@@ -927,6 +927,8 @@ def url2file(url):
 # Check first-install steps
 PREFIX = colorstr('Ultralytics: ')
 SETTINGS = SettingsManager()  # initialize settings
+print(f"SETTINGS: {SETTINGS}")
+# print(r"should delete {root}/../.config/Ultralytics/settings.yaml if need update SETTINGS")
 DATASETS_DIR = Path(SETTINGS['datasets_dir'])  # global datasets directory
 WEIGHTS_DIR = Path(SETTINGS['weights_dir'])  # global weights directory
 RUNS_DIR = Path(SETTINGS['runs_dir'])  # global runs directory

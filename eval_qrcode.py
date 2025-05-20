@@ -37,12 +37,12 @@ def plot_boxes(img, boxes, filepath=None, color=(0, 255, 0)):
 
 
 
-def load_data(result_label_dir, labels_dir, images_dir):
+def load_data(pred_label_dir, labels_dir, images_dir):
     
     data_all = []
 
     labels_List = glob.glob(labels_dir)
-    for label_file in tqdm(labels_List):
+    for label_file in tqdm(labels_List, desc='loading GT data'):
         img_path = os.path.join(images_dir,os.path.split(label_file)[1][:-4] + '.jpg')
         # img_path = os.path.join('/mnt/pai-storage-14/algorithm/zhouyanggang/datasets/Facedetect_data/yolo-face_data/Uface/val/images',os.path.split(label_file)[1][:-4] + '.jpg')
         # img_path = os.path.join('/mnt/pai-storage-8/tianyuan/pfd/data/normal/val/images',os.path.split(label_file)[1][:-4] + '.jpg')    
@@ -59,7 +59,7 @@ def load_data(result_label_dir, labels_dir, images_dir):
         h, w = img.shape[:-1]
         boxes_gt = []
         with open(label_file, 'r') as f:
-            data_gt = [x.split() for x in f.read().strip().splitlines() if x.startswith('0')]
+            data_gt = [x.split() for x in f.read().strip().splitlines() if x.startswith('1')]  # 0 is face, 1 is qrcode
             if len(data_gt) == 0:
                 continue
             for da_gt in data_gt:
@@ -68,15 +68,18 @@ def load_data(result_label_dir, labels_dir, images_dir):
                 boxes_gt.extend(box_gt)    
         boxes_gt = np.array(boxes_gt, dtype=np.float32).reshape(-1, 4)
 
-        label_file2 = os.path.join(result_label_dir,os.path.split(label_file)[1])
+        label_file2 = os.path.join(pred_label_dir,os.path.split(label_file)[1])
         boxes = []
         if os.path.exists(label_file2):
             with open(label_file2, 'r') as f:
                 data_pred = [x.split() for x in f.read().strip().splitlines() if len(x)]
                 for da_pred in data_pred:
-                    if len(da_pred) == 5:
+                    if len(da_pred) == 5 and da_pred[0] == '1':  # 1 is qrcode
                         box0_pred = [eval(a) for a in da_pred[1:5]]
-                        box_pred = yolo2xywh((w,h),box0_pred)
+                        if box0_pred:
+                            box_pred = yolo2xywh((w,h),box0_pred)
+                        else:
+                            continue
                         # box_pred = xyxy2xywh(box0_pred)
                     else:
                         box0_pred = [eval(a) for a in da_pred[0:4]]
@@ -120,29 +123,34 @@ def eval_fddb(fddb_data, iou_ths=0.2, error_path=None):
             os.system('rm -r %s' % error_path)
         os.system('mkdir %s' % error_path)
 
+    if SAVE_TRUE_POSITIVE_BBOXES:
+        correct_pred_bboxes_path = os.path.join(os.path.dirname(error_path), 'correct')
+        os.system('mkdir %s' % correct_pred_bboxes_path)
+
     tp, fp = 0, 0
-    num_faces = 0
+    num_faces_gt = 0
 
     for i, item in enumerate(fddb_data):
         if (i + 1) % 200 == 0:
             print('%d/%d ...' % ((i + 1), len(fddb_data)))
         img_path = item['img_path']
         basename = os.path.split(img_path)[-1]
+
         I = item['image']
         boxes_gt = item['boxes_gt']
-        num_faces += len(boxes_gt)
-        boxes = item['boxes_pred']
-            
-        if boxes is None or len(boxes) == 0:
+        num_faces_gt += len(boxes_gt)
+        boxes_pred = item['boxes_pred']  # if negative in boxes_pred, seems cv2.rectangle can not draw it right
+
+        if boxes_pred is None or len(boxes_pred) == 0:
             plot_boxes(I, boxes_gt,
                        os.path.join(error_path, basename),
-                       color=(255, 0, 0))
+                       color=(255, 0, 0))  # blue
             continue
 
         tp_current, fp_current = 0, 0
         # print('fhfhfhfhhfhf', boxes_pred.shape)
-        for box in boxes:
-            Iou = IoU(box, boxes_gt)
+        for box_pred in boxes_pred:
+            Iou = IoU(box_pred, boxes_gt)
             if np.max(Iou) > iou_ths:
                 tp_current += 1
             else:
@@ -152,26 +160,34 @@ def eval_fddb(fddb_data, iou_ths=0.2, error_path=None):
         fp += fp_current
         # if error_path is not None and (tp_current != len(boxes_gt) or fp_current > 0):
         if error_path is not None and (fp_current > 0):
-            I = plot_boxes(I, boxes_gt, color=(0, 255, 0))
-            plot_boxes(I, boxes,
+            I = plot_boxes(I, boxes_gt, color=(0, 255, 0))  # green
+            plot_boxes(I, boxes_pred,
                        os.path.join(error_path, basename),
-                       color=(0, 0, 255))
+                       color=(0, 0, 255))  # red
         
+        if SAVE_TRUE_POSITIVE_BBOXES and tp_current > 0 and fp_current == 0:
+            I = plot_boxes(I, boxes_gt, color=(0, 255, 0))  # green
+            plot_boxes(I, boxes_pred,
+                        os.path.join(correct_pred_bboxes_path, basename),
+                        color=(0, 0, 255))  # red
 
-    tpr = tp / num_faces
-    print('num_faces_gt=%d tpr=%0.2f%%@fp=%d' % (num_faces, 100 * tpr, fp))
+
+    tpr = tp / num_faces_gt
+    print('num_faces_gt=%d tp=%d tpr=%0.2f%% @fp=%d' % (num_faces_gt, tp, 100 * tpr, fp))
  
 
 if __name__ == '__main__':
-    fddb_dir = "/mnt/pai-storage-1/tianyuan/workspace/facedet/FDDB"
-    # fddb_dir = "/mnt/pai-storage-14/algorithm/zhouyanggang/datasets/Facedetect_data/yolo-face_data/Uface"
-    # fddb_dir = "/mnt/pai-storage-8/tianyuan/pfd/data/normal"
-    labels_dir = os.path.join(fddb_dir, "val/labels/*")
-    images_dir = os.path.join(fddb_dir, "val/images")
+    SAVE_TRUE_POSITIVE_BBOXES = True
 
-    # fddb_dir = '/mnt/pai-storage-12/data/qrcode_data/qrcode/250512/test'
-    # labels_dir = os.path.join(fddb_dir, "labels/*")
-    # images_dir = os.path.join(fddb_dir, "images")
+    # fddb_dir = "/mnt/pai-storage-1/tianyuan/workspace/facedet/FDDB"
+    # # fddb_dir = "/mnt/pai-storage-14/algorithm/zhouyanggang/datasets/Facedetect_data/yolo-face_data/Uface"
+    # # fddb_dir = "/mnt/pai-storage-8/tianyuan/pfd/data/normal"
+    # labels_dir = os.path.join(fddb_dir, "val/labels/*")
+    # images_dir = os.path.join(fddb_dir, "val/images")
+
+    fddb_dir = '/mnt/pai-storage-12/data/qrcode_data/qrcode/250512/test'
+    labels_dir = os.path.join(fddb_dir, "labels/*")
+    images_dir = os.path.join(fddb_dir, "images")
     
     # result_labels_dir = r'/mnt/pai-storage-8/tianyuan/face_qrcode_det/yolov8/runs/predict_pt/face_qrcode_0429/labels'
     # error_dir = r'/mnt/pai-storage-8/tianyuan/face_qrcode_det/yolov8/check'
@@ -185,8 +201,11 @@ if __name__ == '__main__':
     # result_labels_dir = "/data/wangjiazhi/projs/yolov8_0512/runs/predict_pt/face_qrcode__20250513_185727-epoch200-best/labels"
     # error_dir = "/data/wangjiazhi/projs/yolov8_0512/runs/predict_pt/face_qrcode__20250513_185727-epoch200-best/check"
     
-    result_labels_dir = "/data/wangjiazhi/projs/yolov8_0512/runs/detect/8ntiny_640_face_qrcode_20250516_184717/predict_result/FDDB-epoch200-best/labels"
-    error_dir = "/data/wangjiazhi/projs/yolov8_0512/runs/detect/8ntiny_640_face_qrcode_20250516_184717/predict_result/FDDB-epoch200-best/check"
+    result_labels_dir = "/data/wangjiazhi/projs/yolov8_0512/runs/detect/8ntiny_640_face_qrcode_20250516_184717/predict_result/qrcode0512-epoch200-best/labels"
+    error_dir = "/data/wangjiazhi/projs/yolov8_0512/runs/detect/8ntiny_640_face_qrcode_20250516_184717/predict_result/qrcode0512-epoch200-best/check2"
+
+    # result_labels_dir = "/data/wangjiazhi/projs/yolov8_0512/runs/detect/8ntiny_640_face_qrcode_20250424_145846/predict_result/qrcode0512-epoch138-best/labels"
+    # error_dir = "/data/wangjiazhi/projs/yolov8_0512/runs/detect/8ntiny_640_face_qrcode_20250424_145846/predict_result/qrcode0512-epoch138-best/check2"
 
     fddb_data = load_data(result_labels_dir, labels_dir, images_dir)
 
@@ -194,8 +213,8 @@ if __name__ == '__main__':
     print(f"predict_error: {predict_error}")
     if not os.path.exists(predict_error):
         os.makedirs(predict_error)
-    else:
-        raise ValueError(f"predict_error: {predict_error} already exists")
+    # else:
+    #     raise ValueError(f"predict_error: {predict_error} already exists")
 
     eval_fddb(fddb_data, error_path=predict_error)
 

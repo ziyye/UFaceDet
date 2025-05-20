@@ -2,32 +2,38 @@
 # path: /mnt/pai-storage-8/tianyuan/facedet/sqyolov8/dataset  # dataset root dir
 train: 
       [
-      /mnt/pai-storage-12/data/Facedetect_data/yolo-face_data/widerface/train,
-      /mnt/pai-storage-12/data/Facedetect_data/yolo-face_data/MAFA/train,
-      /mnt/pai-storage-12/data/Facedetect_data/yolo-face_data/Celeba/train,
-      /mnt/pai-storage-12/data/Facedetect_data/yolo-face_data/shangchao_data/train,
-      /mnt/pai-storage-12/data/Facedetect_data/yolo-face_data/Uface/train,
+      /mnt/pai-storage-12/data/Facedetect_data/yolo-face_data/widerface/train,  # 12682 images
+      /mnt/pai-storage-12/data/Facedetect_data/yolo-face_data/MAFA/train,  # 17789 images
+      /mnt/pai-storage-12/data/Facedetect_data/yolo-face_data/Celeba/train,  # 39095 images
+      /mnt/pai-storage-12/data/Facedetect_data/yolo-face_data/shangchao_data/train,  # 94737 images
+      /mnt/pai-storage-12/data/Facedetect_data/yolo-face_data/Uface/train,  # 50656 images
       /mnt/pai-storage-12/data/Facedetect_data/yolo-face_data/Uface_register/train,
       /mnt/pai-storage-12/data/Facedetect_data/yolo-face_data/hand/train,
       /mnt/pai-storage-12/data/Facedetect_data/yolo-face_data/background/train,
       /mnt/pai-storage-12/data/Facedetect_data/yolo-face_data/animals/train,
+      /mnt/pai-storage-12/data/Facedetect_data/yolo-face_data/PandaEmoji/train,
       /mnt/pai-storage-12/data/qrcode_data/qrcode/public_1/train,
       /mnt/pai-storage-12/data/qrcode_data/qrcode/public_2/train,
-      /mnt/pai-storage-12/data/qrcode_data/qrcode/synthetise/train
+      /mnt/pai-storage-12/data/qrcode_data/qrcode/synthetise/train,
+      /mnt/pai-storage-12/data/qrcode_data/qrcode/250508/train,
+      /mnt/pai-storage-12/data/qrcode_data/qrcode/250512/train
       ]                        
 weights: [
       5,    # widerface
-      1,    # MAFA
-      1,    # Celeba
-      2,    # shangchao_data
+      0.5,    # MAFA
+      0.5,    # Celeba
+      0.2,    # shangchao_data
       2,    # Uface
       2,    # Uface_register
-      1,    # hand
-      0.5,  # background
-      1,    # animals
-      2,    # qrcode_public_1
-      2,    # qrcode_public_2
-      2     # qrcode_synthetise
+      3,    # hand
+      1,  # background
+      2,    # animals
+      2,    # PandaEmoji
+      1,    # qrcode_public_1
+      1,    # qrcode_public_2
+      0.1,    # qrcode_synthetise
+      2,     # qrcode_250508
+      2     # qrcode_250512
       ]        
         
 val: 
@@ -38,9 +44,10 @@ val:
       /mnt/pai-storage-12/data/Facedetect_data/yolo-face_data/shangchao_data/val,
       /mnt/pai-storage-12/data/qrcode_data/qrcode/public_1/val,
       /mnt/pai-storage-12/data/qrcode_data/qrcode/public_2/val,
-      /mnt/pai-storage-12/data/qrcode_data/qrcode/synthetise/val
+      /mnt/pai-storage-12/data/qrcode_data/qrcode/synthetise/val,
       # /mnt/pai-storage-12/data/Facedetect_data/yolo-face_data/Uface/val,
       # /mnt/pai-storage-12/data/Facedetect_data/yolo-face_data/Uface_register/val,
+      /mnt/pai-storage-12/data/qrcode_data/qrcode/250508/val
       ]
         # [
         # 'Celeba/val',               600

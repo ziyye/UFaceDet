@@ -1153,22 +1153,11 @@ def v8_transforms(dataset, imgsz, hyp, stretch=False):
         elif flip_idx and (len(flip_idx) != kpt_shape[0]):
             raise ValueError(f'data.yaml flip_idx={flip_idx} length must be equal to kpt_shape[0]={kpt_shape[0]}')
 
-    # --- 新增：定义二维码类别索引和亮度增强参数 ---
-    qrcode_cls_index = 1 # 假设二维码的类别索引是 1
-    brightness_range = (5.0, 8.0) # 亮度增强范围（1.0 到 1.5 倍）
-    brightness_p = 0.5 # 当图像包含二维码时，应用此增强的概率为 50%
-    # --- 新增结束 ---
-
     return Compose([
         pre_transform,
         MixUp(dataset, pre_transform=pre_transform, p=hyp.mixup),
         Albumentations(p=1.0),
         RandomHSV(hgain=hyp.hsv_h, sgain=hyp.hsv_s, vgain=hyp.hsv_v),
-        # --- 新增：添加条件亮度增强 ---
-        ConditionalBrightness(brightness_factor_range=brightness_range,
-                              target_cls_index=qrcode_cls_index,
-                              p=brightness_p),
-        # --- 新增结束 ---
         RandomFlip(direction='vertical', p=hyp.flipud),
         RandomFlip(direction='horizontal', p=hyp.fliplr, flip_idx=flip_idx),
         # RandomErasing(p=0.5)  # 添加随机擦除
