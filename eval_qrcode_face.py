@@ -4,9 +4,9 @@ import os
 import numpy as np
 import torch
 from tqdm import tqdm
+import time
 # from detect import CenterFace
 
-# a unified script to test qrcode and face detection. Work in progress.
 
 def yolo2xywh(size, box):
     w = size[0]
@@ -80,12 +80,12 @@ def load_data(pred_result_dir, gt_labels_dir, images_dir, class_idx):
             boxes = np.array(boxes, dtype=np.float32).reshape(-1, 4)
         else:
             boxes = np.array(boxes)
-        # 将数据添加到列表中
+        
         data_all.append({
             'img_path': img_path,
             'boxes_gt': boxes_gt,
             'boxes_pred':boxes,
-            'image': img,  # 加载的图像
+            'image': img,
         })
 
     return data_all
@@ -109,7 +109,7 @@ def IoU(box, boxes):
     return ovr_union
 
 
-def eval_fddb(fddb_data, iou_ths=0.2, error_path=None):
+def eval_testset(objects_data, iou_ths=0.2, error_path=None):
     if error_path is not None:
         if os.path.exists(error_path):
             os.system('rm -r %s' % error_path)
@@ -122,9 +122,9 @@ def eval_fddb(fddb_data, iou_ths=0.2, error_path=None):
     tp, fp = 0, 0
     num_objects_gt = 0
 
-    for i, item in enumerate(fddb_data):
+    for i, item in enumerate(objects_data):
         if (i + 1) % 200 == 0:
-            print('%d/%d ...' % ((i + 1), len(fddb_data)))
+            print('%d/%d ...' % ((i + 1), len(objects_data)))
         img_path = item['img_path']
         basename = os.path.split(img_path)[-1]
 
@@ -171,10 +171,8 @@ def eval_fddb(fddb_data, iou_ths=0.2, error_path=None):
 if __name__ == '__main__':
     SAVE_TRUE_POSITIVE_BBOXES = True
 
-    pred_results_dir = "/data/wangjiazhi/projs/yolov8_0512/runs/detect/8ntiny_640_face_qrcode_20250424_145846/predict_result-ScriptTest/FDDB-epoch138-best/labels"
-    pred_results_dir = "/data/wangjiazhi/projs/yolov8_0512/runs/detect/8ntiny_640_face_qrcode_20250424_145846/predict_result-ScriptTest/qrcode0512-epoch138-best2/labels"
-    pred_results_dir = "/data/wangjiazhi/projs/yolov8_0512/runs/detect/8ntiny_640_face_qrcode_20250519_013541/predict_result/FDDB-epoch200/labels"
-    pred_results_dir = "/data/wangjiazhi/projs/yolov8_0512/runs/detect/8ntiny_640_face_qrcode_20250519_013541/predict_result/qrcode0512-epoch200/labels"
+    pred_results_dir = "/data/wangjiazhi/projs/yolov8_0512/runs/detect/8ntiny_640_face_qrcode_20250519_013541/predict_result/qrcode0512-epoch272-best/labels"
+
     # TEST_SET_NAME = "FDDB"  # FDDB, qrcode0512
     TEST_SET_NAME = "qrcode0512"
 
@@ -195,7 +193,7 @@ if __name__ == '__main__':
     images_dir = testset_config["images_dir"]
     class_idx = testset_config["class_idx"]
     
-    visualize_dir = os.path.join(os.path.dirname(pred_results_dir), "check2")
+    visualize_dir = os.path.join(os.path.dirname(pred_results_dir), "check")
     visualize_error_dir = os.path.join(visualize_dir, "errors")
 
     print(f"visualize_error_dir: {visualize_error_dir}")
@@ -204,13 +202,9 @@ if __name__ == '__main__':
     else:
         raise ValueError(f"visualize_error_dir: {visualize_error_dir} already exists!")
 
-    fddb_data = load_data(pred_results_dir, labels_dir, images_dir, class_idx)
-    eval_fddb(fddb_data, error_path=visualize_error_dir)
-
-
-'''
-
-2002_07_26_big_img_936.txt
-2003_01_14_big_img_660.txt
-tpr=86.23%@fp=35
-'''
+    t0 = time.time()
+    objects_data = load_data(pred_results_dir, labels_dir, images_dir, class_idx)
+    t1 = time.time()
+    print(f"Load data time cost: {(t1 - t0)/60:.2f} minutes")
+    eval_testset(objects_data, error_path=visualize_error_dir)
+    print(f"Eval time cost: {(time.time() - t1)/60:.2f} minutes")
